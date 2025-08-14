@@ -6,7 +6,7 @@ const app = express();
 
 // CORS и парсинг JSON
 app.use(cors());
-app.use(express.json({ type: "*/*", limit: "1mb" }));
+app.use(express.json({ type: "/", limit: "1mb" }));
 
 // Проверка живости
 app.get("/health", (req, res) => {
@@ -14,7 +14,7 @@ app.get("/health", (req, res) => {
 });
 
 /**
- * 1) Главный прокси для OpenRouter
+ * 1) Главный прокси для OpenRouter (POST /?url=...)
  */
 app.post("/", async (req, res) => {
   const targetUrl = req.query.url;
@@ -33,15 +33,25 @@ app.post("/", async (req, res) => {
       bodyType: typeof req.body
     });
 
-    const allow = ["authorization", "content-type", "x-title", "http-referer", "referer", "accept"];
+    const allow = [
+      "authorization",
+      "content-type",
+      "x-title",
+      "http-referer",
+      "referer",
+      "accept"
+    ];
     const headersToForward = {};
-    for (const k of allow) if (req.headers[k]) headersToForward[k] = req.headers[k];
+    for (const k of allow) {
+      if (req.headers[k]) headersToForward[k] = req.headers[k];
+    }
 
     if (!headersToForward["content-type"]) {
       headersToForward["content-type"] = "application/json";
     }
 
-    const bodyString = typeof req.body === "string" ? req.body : JSON.stringify(req.body);
+    const bodyString =
+      typeof req.body === "string" ? req.body : JSON.stringify(req.body);
 
     const upstream = await fetch(targetUrl, {
       method: "POST",
@@ -56,7 +66,8 @@ app.post("/", async (req, res) => {
     let out = rawText;
     try {
       const data = JSON.parse(rawText);
-      if (data?.choices?.[0]?.message?.content) out = data.choices[0].message.content;
+      if (data?.choices?.[0]?.message?.content)
+        out = data.choices[0].message.content;
       else if (data?.choices?.[0]?.text) out = data.choices[0].text;
       else if (typeof data === "string") out = data;
     } catch {
@@ -69,12 +80,15 @@ app.post("/", async (req, res) => {
       .send(out);
   } catch (e) {
     console.error("💥 PROXY ERROR:", e);
-    res.status(500).type("text/plain; charset=utf-8").send("Ошибка на прокси-сервере");
+    res
+      .status(500)
+      .type("text/plain; charset=utf-8")
+      .send("Ошибка на прокси-сервере");
   }
 });
 
 /**
- * 2) GNews с поддержкой перелистывания страниц
+ * 2) Специальный маршрут для GNews (GET /gnews)
  */
 app.get("/gnews", async (req, res) => {
   try {
@@ -85,15 +99,17 @@ app.get("/gnews", async (req, res) => {
     const max = (req.query.max ?? "5").toString();
     const mode = (req.query.mode ?? "text").toString();
 
-    const token = process.env.GNEWS_TOKEN || (req.query.token ?? "").toString();
+    const token =
+      process.env.GNEWS_TOKEN || (req.query.token ?? "").toString();
     if (!token) {
       return res
         .status(400)
         .type("text/plain; charset=utf-8")
-        .send('Ошибка: нет API-ключа. Добавь GNEWS_TOKEN в переменные окружения или передай ?token=...');
+        .send(
+          'Ошибка: нет API-ключа. Добавь переменную окружения GNEWS_TOKEN или передавай ?token=...'
+        );
     }
 
-    // Определяем endpoint и запрос
     let endpoint = "search";
     let query = qParam || cat;
 
@@ -107,20 +123,18 @@ app.get("/gnews", async (req, res) => {
     params.set("max", max);
     params.set("token", token);
 
-    // Новое: поддержка параметра page
-    let page = req.query.page;
-    if (!page) {
-      // случайная страница от 1 до 10, чтобы выдача была разная
-      page = Math.floor(Math.random() * 10) + 1;
-    }
-    params.set("page", page.toString());
+    // Рандомная страница, чтобы новости не повторялись
+    const page = Math.floor(Math.random() * 100) + 1; // от 1 до 100
+    params.set("page", page);
 
     if (endpoint === "search") {
       if (!query) {
         return res
           .status(400)
           .type("text/plain; charset=utf-8")
-          .send('Ошибка: параметр q обязателен для /search. Передай ?q=... или ?cat=... (кроме "ГЗ").');
+          .send(
+            'Ошибка: параметр q обязателен для /search. Передай ?q=... или ?cat=... (кроме "ГЗ").'
+          );
       }
       params.set("q", query);
     }
@@ -130,12 +144,15 @@ app.get("/gnews", async (req, res) => {
 
     const upstream = await fetch(finalUrl, {
       method: "GET",
-      headers: { "Accept": "application/json" }
+      headers: { Accept: "application/json" }
     });
 
     const text = await upstream.text();
     if (!upstream.ok) {
-      return res.status(upstream.status).type("text/plain; charset=utf-8").send(text);
+      return res
+        .status(upstream.status)
+        .type("text/plain; charset=utf-8")
+        .send(text);
     }
 
     if (mode === "raw") {
@@ -167,7 +184,10 @@ app.get("/gnews", async (req, res) => {
     res.type("text/plain; charset=utf-8").send(out);
   } catch (err) {
     console.error("💥 GNEWS ERROR:", err);
-    res.status(500).type("text/plain; charset=utf-8").send("Ошибка при запросе к GNews");
+    res
+      .status(500)
+      .type("text/plain; charset=utf-8")
+      .send("Ошибка при запросе к GNews");
   }
 });
 
