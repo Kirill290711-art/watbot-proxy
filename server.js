@@ -1,32 +1,32 @@
-import express from "express";
-import fetch from "node-fetch";
-
+const express = require('express');
+const fetch = require('node-fetch');
 const app = express();
 
-app.get("/", async (req, res) => {
-  const apiUrl = req.query.url;
-  if (!apiUrl) {
-    return res.status(400).send("❌ Укажи параметр ?url=");
-  }
+app.use(express.json());
+
+app.all('/', async (req, res) => {
+  const targetUrl = req.query.url;
+  if (!targetUrl) return res.status(400).send('Укажи параметр ?url=');
 
   try {
-    const response = await fetch(apiUrl);
-    let text = await response.text();
+    const fetchRes = await fetch(targetUrl, {
+      method: req.method,
+      headers: req.headers,
+      body: ['GET', 'HEAD'].includes(req.method) ? undefined : JSON.stringify(req.body),
+    });
 
-    // Убираем все \uXXXX
-    text = text.replace(/\\u[\dA-Fa-f]{4}/g, "");
+    let text = await fetchRes.text();
 
-    // Если JSON — превращаем в строку
-    try {
-      const json = JSON.parse(text);
-      text = JSON.stringify(json);
-    } catch {}
+    // Декодим Unicode-последовательности
+    text = text.replace(/\\u[\dA-Fa-f]{4}/g, match =>
+      String.fromCharCode(parseInt(match.replace('\\u', ''), 16))
+    );
 
-    res.type("text/plain").send(text);
+    res.set('Content-Type', fetchRes.headers.get('content-type') || 'application/json');
+    res.send(text);
   } catch (err) {
-    res.status(500).send("Ошибка запроса: " + err.message);
+    res.status(500).send({ error: err.message });
   }
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`watbot-proxy running on port ${port}`));
+app.listen(3000, () => console.log('Proxy running on port 3000'))
