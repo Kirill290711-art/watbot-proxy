@@ -13,16 +13,24 @@ app.post("/", async (req, res) => {
       return res.status(400).send("Ошибка: не указан параметр ?url=");
     }
 
+    console.log("=== Новый запрос ===");
+    console.log("URL:", targetUrl);
+    console.log("Заголовки:", req.headers);
+    console.log("Тело запроса:", JSON.stringify(req.body, null, 2));
+
     const response = await fetch(targetUrl, {
       method: "POST",
       headers: req.headers,
       body: JSON.stringify(req.body)
     });
 
+    console.log("Статус ответа от OpenRouter:", response.status);
+
     const data = await response.json();
+    console.log("Тело ответа от OpenRouter:", JSON.stringify(data, null, 2));
 
     let text = "";
-    if (data.choices?.[0]?.message?.content) {
+    if (data.choices && data.choices[0]?.message?.content) {
       text = data.choices[0].message.content;
     } else if (typeof data === "string") {
       text = data;
@@ -30,14 +38,12 @@ app.post("/", async (req, res) => {
       text = JSON.stringify(data);
     }
 
-    // Явно указываем текст и кодировку
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     res.send(text);
 
   } catch (error) {
-    console.error(error);
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    res.status(500).send("Ошибка на сервере: " + error.message);
+    console.error("Ошибка на сервере:", error);
+    res.status(500).send("Ошибка на сервере");
   }
 });
 
