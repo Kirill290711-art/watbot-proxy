@@ -4,34 +4,18 @@ import cors from "cors";
 
 const app = express();
 
-/* ======================= Общие настройки ======================= */
-
-// CORS и парсинг JSON (на любой content-type — важно для Watbot)
+// CORS и парсинг JSON
 app.use(cors());
-app.use(express.json({ type: "*/*", limit: "1mb" }));
+app.use(express.json({ type: "/", limit: "1mb" }));
 
-// Неболтливые логи (поставь LOG_LEVEL=silent в Render, если не хочешь видеть логи)
-const LOG_LEVEL = (process.env.LOG_LEVEL || "info").toLowerCase();
-const log = (...args) => LOG_LEVEL !== "silent" && console.log(...args);
-
-/* ======================= Служебка ======================= */
-
+// Проверка живости
 app.get("/health", (req, res) => {
   res.type("text/plain; charset=utf-8").send(`ok ${new Date().toISOString()}`);
 });
 
-// Утилита: случайное целое [min, max]
-function randInt(min, max) {
-  min = Math.ceil(min);
-  max = Math.floor(max);
-  return Math.floor(Math.random() * (max - min + 1)) + min;
-}
-
-/* =================================================================
- * 1) Прокси-эндпоинт для OpenRouter (POST /?url=...)
- *    — прокидываем тело/заголовки как есть,
- *    — вынимаем «чистый текст» из ответов chat-completions.
- * ================================================================ */
+/**
+ * 1) Главный прокси для OpenRouter (POST /?url=...)
+ */
 app.post("/", async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) {
@@ -42,99 +26,70 @@ app.post("/", async (req, res) => {
   }
 
   try {
-    log("➡ INCOMING:", {
+    console.log("➡ INCOMING:", {
       method: req.method,
       url: targetUrl,
-      bodyType: typeof req.body,
+      headers: req.headers,
+      bodyType: typeof req.body
     });
 
-    // Пробрасываем только безопасные/нужные заголовки
-    const allowHeaders = [
+    const allow = [
       "authorization",
       "content-type",
       "x-title",
       "http-referer",
       "referer",
-      "accept",
-      // Иногда полезны доп. заголовки организации/маршрутизации
-      "x-organization",
-      "x-router",
+      "accept"
     ];
     const headersToForward = {};
-    for (const h of allowHeaders) {
-      const v = req.headers[h];
-      if (v) headersToForward[h] = v;
+    for (const k of allow) {
+      if (req.headers[k]) headersToForward[k] = req.headers[k];
     }
+
     if (!headersToForward["content-type"]) {
       headersToForward["content-type"] = "application/json";
     }
 
-    // Тело запроса
     const bodyString =
-      typeof req.body === "string" ? req.body : JSON.stringify(req.body ?? {});
+      typeof req.body === "string" ? req.body : JSON.stringify(req.body);
 
-    // Запрос к апстриму
     const upstream = await fetch(targetUrl, {
       method: "POST",
       headers: headersToForward,
-      body: bodyString,
+      body: bodyString
     });
 
     const rawText = await upstream.text();
-    log("⬅ UPSTREAM STATUS:", upstream.status);
-    log("⬅ UPSTREAM RAW:", rawText.slice(0, 800));
+    console.log("⬅ UPSTREAM STATUS:", upstream.status);
+    console.log("⬅ UPSTREAM RAW:", rawText.slice(0, 800));
 
-    // Если апстрим вернул ошибку — пробрасываем текст ошибки как есть,
-    // но в text/plain, чтобы Watbot показал его аккуратно.
-    if (!upstream.ok) {
-      return res
-        .status(upstream.status)
-        .type("text/plain; charset=utf-8")
-        .send(rawText);
-    }
-
-    // Пытаемся извлечь «чистый текст» из JSON ответов моделей
     let out = rawText;
     try {
       const data = JSON.parse(rawText);
-
-      // Ветви под разные семейства API
-      if (data?.choices?.[0]?.message?.content) {
+      if (data?.choices?.[0]?.message?.content)
         out = data.choices[0].message.content;
-      } else if (data?.choices?.[0]?.text) {
-        out = data.choices[0].text;
-      } else if (typeof data === "string") {
-        out = data;
-      } else {
-        // Если это не chat-completions (например, tool-calls) — отдаём сырой JSON,
-        // но в text/plain, чтобы Watbot не захлестнуло форматирование.
-        out = rawText;
-      }
+      else if (data?.choices?.[0]?.text) out = data.choices[0].text;
+      else if (typeof data === "string") out = data;
     } catch {
-      // не JSON — отдаём как есть
-      out = rawText;
+      // не JSON
     }
 
-    return res.status(200).type("text/plain; charset=utf-8").send(out);
+    res
+      .status(upstream.ok ? 200 : upstream.status)
+      .type("text/plain; charset=utf-8")
+      .send(out);
   } catch (e) {
     console.error("💥 PROXY ERROR:", e);
-    return res
+    res
       .status(500)
       .type("text/plain; charset=utf-8")
       .send("Ошибка на прокси-сервере");
   }
 });
 
-/* =================================================================
- * 2) Новости GNews (GET /gnews)
- *    Параметры:
- *      - cat: строка. Если "ГЗ" → top-headlines (без q)
- *      - q:   строка, ручной запрос (если есть — важнее cat)
- *      - lang, country, max: опционально (ru, ru, 5)
- *      - token: опционально (или GNEWS_TOKEN в env)
- *      - mode: "text" (по умолчанию) | "raw"
- *      - page: опционально. Если не задан — выбирается случайная страница 1..75
- * ================================================================ */
+/**
+ * 2) Специальный маршрут для GNews (GET /gnews)
+ */
 app.get("/gnews", async (req, res) => {
   try {
     const cat = (req.query.cat ?? "").toString().trim();
@@ -151,17 +106,16 @@ app.get("/gnews", async (req, res) => {
         .status(400)
         .type("text/plain; charset=utf-8")
         .send(
-          'Ошибка: нет API-ключа. Добавь переменную окружения GNEWS_TOKEN в Render или передай ?token=...'
+          'Ошибка: нет API-ключа. Добавь переменную окружения GNEWS_TOKEN или передавай ?token=...'
         );
     }
 
-    // Определяем эндпоинт и запрос
     let endpoint = "search";
     let query = qParam || cat;
 
-    // "ГЗ" → top-headlines (без q)
     if (cat === "ГЗ" || (!query && !qParam && cat === "")) {
       endpoint = "top-headlines";
+      query = ""; // для главных заголовков q не нужен
     }
 
     const params = new URLSearchParams();
@@ -170,49 +124,35 @@ app.get("/gnews", async (req, res) => {
     params.set("max", max);
     params.set("token", token);
 
-    // Рандомная страница 1..75 (если пользователь не задал свою)
-    const pageFromUser = Number(req.query.page);
-    const page =
-      Number.isFinite(pageFromUser) && pageFromUser >= 1
-        ? pageFromUser
-        : randInt(1, 75);
-    params.set("page", String(page));
+    // Рандомная страница 1–75
+    const page = Math.floor(Math.random() * 75) + 1;
+    params.set("page", page);
 
-    // Для search параметр q обязателен
-    if (endpoint === "search") {
-      if (!query) {
-        return res
-          .status(400)
-          .type("text/plain; charset=utf-8")
-          .send(
-            'Ошибка: параметр q обязателен для /search. Передай ?q=... или ?cat=... (кроме "ГЗ").'
-          );
-      }
-      // URLSearchParams сам корректно кодирует Юникод
+    if (endpoint === "search" && query) {
       params.set("q", query);
     }
 
     const finalUrl = `https://gnews.io/api/v4/${endpoint}?${params.toString()}`;
-    // Чтобы токен не светился в логах:
-    log("🔎 GNEWS URL:", finalUrl.replace(token, "******"));
+    console.log("🔎 GNEWS URL:", finalUrl.replace(token, "[HIDDEN]"));
 
     const upstream = await fetch(finalUrl, {
       method: "GET",
-      headers: { Accept: "application/json" },
+      headers: { Accept: "application/json" }
     });
 
     const text = await upstream.text();
-
     if (!upstream.ok) {
-      // пробрасываем ответ GNews как есть (text/plain)
-      return res.status(upstream.status).type("text/plain; charset=utf-8").send(text);
+      return res
+        .status(upstream.status)
+        .type("text/plain; charset=utf-8")
+        .send(text);
     }
 
     if (mode === "raw") {
-      return res.type("application/json; charset=utf-8").send(text);
+      res.type("application/json; charset=utf-8").send(text);
+      return;
     }
 
-    // Преобразуем в удобный список для чата
     let out = "";
     try {
       const data = JSON.parse(text);
@@ -231,26 +171,25 @@ app.get("/gnews", async (req, res) => {
           .join("\n\n");
       }
     } catch {
-      // На всякий случай — просто вернём оригинальный текст
       out = text;
     }
 
-    return res.type("text/plain; charset=utf-8").send(out);
+    res.type("text/plain; charset=utf-8").send(out);
   } catch (err) {
     console.error("💥 GNEWS ERROR:", err);
-    return res
+    res
       .status(500)
       .type("text/plain; charset=utf-8")
       .send("Ошибка при запросе к GNews");
   }
 });
 
-/* ======================= Запуск ======================= */
-
+// Запуск
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ watbot-proxy listening on ${PORT}`);
 });
+
 
 
 
