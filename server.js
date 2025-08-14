@@ -1,32 +1,48 @@
-const express = require('express');
-const fetch = require('node-fetch');
-const app = express();
+import express from "express";
+import fetch from "node-fetch";
+import cors from "cors";
 
+const app = express();
+app.use(cors());
 app.use(express.json());
 
-app.all('/', async (req, res) => {
-  const targetUrl = req.query.url;
-  if (!targetUrl) return res.status(400).send('Укажи параметр ?url=');
-
+app.post("/", async (req, res) => {
   try {
-    const fetchRes = await fetch(targetUrl, {
-      method: req.method,
-      headers: req.headers,
-      body: ['GET', 'HEAD'].includes(req.method) ? undefined : JSON.stringify(req.body),
+    // URL для запроса к OpenAI / OpenRouter
+    const targetUrl = req.query.url;
+    if (!targetUrl) {
+      return res.status(400).send("Ошибка: не указан параметр ?url=");
+    }
+
+    // Запрос к API
+    const response = await fetch(targetUrl, {
+      method: "POST",
+      headers: req.headers, // Передаем те же заголовки, что и в Watbot
+      body: JSON.stringify(req.body)
     });
 
-    let text = await fetchRes.text();
+    const data = await response.json();
 
-    // Декодим Unicode-последовательности
-    text = text.replace(/\\u[\dA-Fa-f]{4}/g, match =>
-      String.fromCharCode(parseInt(match.replace('\\u', ''), 16))
-    );
+    // Достаём только текст ответа
+    let text = "";
+    if (data.choices && data.choices[0]?.message?.content) {
+      text = data.choices[0].message.content;
+    } else if (typeof data === "string") {
+      text = data;
+    } else {
+      text = JSON.stringify(data);
+    }
 
-    res.set('Content-Type', fetchRes.headers.get('content-type') || 'application/json');
+    // Отдаём только чистый текст
     res.send(text);
-  } catch (err) {
-    res.status(500).send({ error: err.message });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).send("Ошибка на сервере");
   }
 });
 
-app.listen(3000, () => console.log('Proxy running on port 3000'))
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Сервер запущен на порту ${PORT}`);
+});
