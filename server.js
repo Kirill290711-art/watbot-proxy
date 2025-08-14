@@ -8,24 +8,21 @@ app.use(express.json());
 
 app.post("/", async (req, res) => {
   try {
-    // URL для запроса к OpenAI / OpenRouter
     const targetUrl = req.query.url;
     if (!targetUrl) {
       return res.status(400).send("Ошибка: не указан параметр ?url=");
     }
 
-    // Запрос к API
     const response = await fetch(targetUrl, {
       method: "POST",
-      headers: req.headers, // Передаем те же заголовки, что и в Watbot
+      headers: req.headers,
       body: JSON.stringify(req.body)
     });
 
     const data = await response.json();
 
-    // Достаём только текст ответа
     let text = "";
-    if (data.choices && data.choices[0]?.message?.content) {
+    if (data.choices?.[0]?.message?.content) {
       text = data.choices[0].message.content;
     } else if (typeof data === "string") {
       text = data;
@@ -33,12 +30,14 @@ app.post("/", async (req, res) => {
       text = JSON.stringify(data);
     }
 
-    // Отдаём только чистый текст
+    // Явно указываем текст и кодировку
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
     res.send(text);
 
   } catch (error) {
     console.error(error);
-    res.status(500).send("Ошибка на сервере");
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.status(500).send("Ошибка на сервере: " + error.message);
   }
 });
 
