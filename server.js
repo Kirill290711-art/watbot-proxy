@@ -1,25 +1,28 @@
 import express from "express";
 import cors from "cors";
-// В Node 18+ fetch уже встроен. node-fetch тоже подключён в package.json — проблем не будет.
 
+// В Node 18+ fetch уже встроен, node-fetch подключать не нужно.
 const app = express();
-app.get("/health", (req, res) => {
-  res.type("text/plain; charset=utf-8").send(ok ${new Date().toISOString()});
-});
-app.use(cors());
-// Парсим JSON даже если Content-Type странный
-app.use(express.json({ type: "/", limit: "1mb" }));
 
 // Простая проверка живости
 app.get("/health", (req, res) => {
-  res.type("text/plain; charset=utf-8").send(ok ${new Date().toISOString()});
+  res
+    .type("text/plain; charset=utf-8")
+    .send(`ok ${new Date().toISOString()}`);
 });
+
+app.use(cors());
+
+// Парсим JSON даже если Content-Type странный
+app.use(express.json({ type: "*/*", limit: "1mb" }));
 
 // Главный прокси-эндпоинт
 app.post("/", async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) {
-    return res.status(400).type("text/plain; charset=utf-8")
+    return res
+      .status(400)
+      .type("text/plain; charset=utf-8")
       .send("Ошибка: укажи параметр ?url=");
   }
 
@@ -78,12 +81,9 @@ app.post("/", async (req, res) => {
         out = data.choices[0].text;
       } else if (typeof data === "string") {
         out = data;
-      } else {
-        out = rawText; // отдаём как есть
       }
     } catch {
       // не JSON — отдаём как есть
-      out = rawText;
     }
 
     res
@@ -93,7 +93,9 @@ app.post("/", async (req, res) => {
 
   } catch (e) {
     console.error("💥 PROXY ERROR:", e);
-    res.status(500).type("text/plain; charset=utf-8")
+    res
+      .status(500)
+      .type("text/plain; charset=utf-8")
       .send("Ошибка на прокси-сервере");
   }
 });
@@ -101,5 +103,5 @@ app.post("/", async (req, res) => {
 // Запуск
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(✅ watbot-proxy listening on ${PORT});
+  console.log(`✅ watbot-proxy listening on ${PORT}`);
 });
