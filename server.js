@@ -1,102 +1,59 @@
 import express from "express";
+import fetch from "node-fetch";
 import cors from "cors";
-// В Node 18+ fetch уже встроен. node-fetch тоже подключён в package.json — проблем не будет.
 
 const app = express();
 app.use(cors());
-// Парсим JSON даже если Content-Type странный
-app.use(express.json({ type: "*/*", limit: "1mb" }));
+app.use(express.json());
 
-// Простая проверка живости
+// Healthcheck
 app.get("/health", (req, res) => {
-  res.type("text/plain; charset=utf-8").send(`ok ${new Date().toISOString()}`);
+  res.send("OK");
 });
 
-// Главный прокси-эндпоинт
 app.post("/", async (req, res) => {
-  const targetUrl = req.query.url;
-  if (!targetUrl) {
-    return res.status(400).type("text/plain; charset=utf-8")
-      .send("Ошибка: укажи параметр ?url=");
-  }
-
   try {
-    // Логи входящего запроса от Watbot
-    console.log("➡️ INCOMING from Watbot:", {
-      method: req.method,
-      url: targetUrl,
-      headers: req.headers,
-      body: req.body
-    });
-
-    // Пробрасываем только нужные заголовки
-    const headersToForward = {};
-    const allow = [
-      "authorization",
-      "content-type",
-      "x-title",
-      "http-referer",
-      "referer",
-      "accept"
-    ];
-    for (const k of allow) {
-      if (req.headers[k]) headersToForward[k] = req.headers[k];
+    const targetUrl = req.query.url || "https://openrouter.ai/api/v1/chat/completions";
+    if (!targetUrl) {
+      return res.status(400).send("Ошибка: не указан параметр ?url=");
     }
 
-    // Если Content-Type не задан — выставим JSON
-    if (!headersToForward["content-type"]) {
-      headersToForward["content-type"] = "application/json";
-    }
-
-    // Тело запроса в строку
-    const bodyString =
-      typeof req.body === "string" ? req.body : JSON.stringify(req.body);
-
-    // Запрос к целевому API
-    const upstream = await fetch(targetUrl, {
-      method: "POST",
-      headers: headersToForward,
-      body: bodyString
-    });
-
-    const rawText = await upstream.text();
-
-    // Лог ответа апстрима (обрезаем для читаемости)
-    console.log("⬅️ UPSTREAM STATUS:", upstream.status);
-    console.log("⬅️ UPSTREAM RAW:", rawText.slice(0, 800));
-
-    // Пытаемся вытащить «чистый текст» (для Chat Completions)
-    let out = rawText;
-    try {
-      const data = JSON.parse(rawText);
-      if (data.choices?.[0]?.message?.content) {
-        out = data.choices[0].message.content;
-      } else if (data.choices?.[0]?.text) {
-        out = data.choices[0].text;
-      } else if (typeof data === "string") {
-        out = data;
+    // Если модель пришла в query — заменяем её в теле запроса
+    if (req.query.model) {
+      if (!req.body.model) {
+        req.body.model = req.query.model;
       } else {
-        out = rawText; // отдаём как есть
+        req.body.model = req.query.model; // перезаписываем
       }
-    } catch {
-      // не JSON — отдаём как есть
-      out = rawText;
     }
 
-    res
-      .status(upstream.ok ? 200 : upstream.status)
-      .type("text/plain; charset=utf-8")
-      .send(out);
+    const response = await fetch(targetUrl, {
+      method: "POST",
+      headers: req.headers,
+      body: JSON.stringify(req.body)
+    });
 
-  } catch (e) {
-    console.error("💥 PROXY ERROR:", e);
-    res.status(500).type("text/plain; charset=utf-8")
-      .send("Ошибка на прокси-сервере");
+    const data = await response.json();
+
+    let text = "";
+    if (data.choices && data.choices[0]?.message?.content) {
+      text = data.choices[0].message.content;
+    } else if (typeof data === "string") {
+      text = data;
+    } else {
+      text = JSON.stringify(data);
+    }
+
+    res.send(text);
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).send("Ошибка на сервере");
   }
 });
 
-// Запуск
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ watbot-proxy listening on ${PORT}`);
+  console.log(`Сервер запущен на порту ${PORT}`);
 });
+
