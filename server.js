@@ -27,13 +27,6 @@ app.post("/", async (req, res) => {
   }
 
   try {
-    console.log("➡ INCOMING:", {
-      method: req.method,
-      url: targetUrl,
-      headers: req.headers,
-      bodyType: typeof req.body
-    });
-
     const allow = [
       "authorization",
       "content-type",
@@ -46,7 +39,6 @@ app.post("/", async (req, res) => {
     for (const k of allow) {
       if (req.headers[k]) headersToForward[k] = req.headers[k];
     }
-
     if (!headersToForward["content-type"]) {
       headersToForward["content-type"] = "application/json";
     }
@@ -61,8 +53,6 @@ app.post("/", async (req, res) => {
     });
 
     const rawText = await upstream.text();
-    console.log("⬅ UPSTREAM STATUS:", upstream.status);
-    console.log("⬅ UPSTREAM RAW:", rawText.slice(0, 800));
 
     // Вытаскиваем «чистый текст» из chat-completions
     let out = rawText;
@@ -85,7 +75,6 @@ app.post("/", async (req, res) => {
       .set("Cache-Control", "no-store")
       .send(out);
   } catch (e) {
-    console.error("💥 PROXY ERROR:", e);
     res
       .status(500)
       .type("text/plain; charset=utf-8")
@@ -95,31 +84,16 @@ app.post("/", async (req, res) => {
 
 /**
  * 2) GNews с антиповтором страниц (GET /gnews)
- *
- * Параметры:
- *  - cat: категория (строка). "ГЗ" → top-headlines
- *  - q:   явный текст запроса (перебивает cat, кроме "ГЗ")
- *  - lang, country, max: по умолчанию ru, ru, 5
- *  - token: если не задан GNEWS_TOKEN в переменных окружения
- *  - mode=raw → вернуть сырой JSON; иначе — человекочитаемый список
- *
- * Антиповтор:
- *  - для каждой «сценарной связки» (endpoint+query+lang+country) помним последнюю страницу;
- *  - новая страница: случайная 1..75, но не равная предыдущей для этой связки.
  */
-
-// в памяти: последняя страница по ключу (endpoint|query|lang|country)
 const lastPageMap = new Map();
-
 function keyFor(endpoint, query, lang, country) {
   return `${endpoint}|${query || ""}|${lang}|${country}`;
 }
-
 function pickRandomPageExcept(prev, min = 1, max = 75) {
   if (max <= min) return min;
   let p;
   do {
-    p = Math.floor(Math.random() * (max - min + 1)) + min; // [min..max]
+    p = Math.floor(Math.random() * (max - min + 1)) + min;
   } while (p === prev);
   return p;
 }
@@ -139,28 +113,22 @@ app.get("/gnews", async (req, res) => {
       return res
         .status(400)
         .type("text/plain; charset=utf-8")
-        .send(
-          'Ошибка: нет API-ключа. Добавь переменную окружения GNEWS_TOKEN или передавай ?token=...'
-        );
+        .send('Ошибка: нет API-ключа.');
     }
 
     let endpoint = "search";
     let query = qParam || cat;
-
-    // "Главные заголовки"
     if (cat === "ГЗ" || (!query && !qParam && cat === "")) {
       endpoint = "top-headlines";
-      query = ""; // для top-headlines q не обязателен
+      query = "";
     }
 
-    // Собираем параметры запроса
     const params = new URLSearchParams();
     params.set("lang", lang);
     params.set("country", country);
     params.set("max", max);
     params.set("token", token);
 
-    // Выбираем страницу с антиповтором для конкретной связки
     const key = keyFor(endpoint, query, lang, country);
     const prevPage = lastPageMap.get(key) ?? null;
     const page = pickRandomPageExcept(prevPage, 1, 75);
@@ -172,20 +140,14 @@ app.get("/gnews", async (req, res) => {
         return res
           .status(400)
           .type("text/plain; charset=utf-8")
-          .send(
-            'Ошибка: параметр q обязателен для /search. Передай ?q=... или ?cat=... (кроме "ГЗ").'
-          );
+          .send('Ошибка: параметр q обязателен.');
       }
-      // URLSearchParams сам закодирует Unicode
       params.set("q", query);
     }
 
-    // анти‑кэш, чтобы CDN не возвращал одно и то же
     params.set("_t", Math.random().toString(36).slice(2));
 
     const finalUrl = `https://gnews.io/api/v4/${endpoint}?${params.toString()}`;
-    console.log("🔎 GNEWS URL:", finalUrl.replace(token, "[HIDDEN]"));
-
     const upstream = await fetch(finalUrl, {
       method: "GET",
       headers: { Accept: "application/json" }
@@ -207,7 +169,6 @@ app.get("/gnews", async (req, res) => {
       return;
     }
 
-    // Человекочитаемый список
     let out = "";
     try {
       const data = JSON.parse(text);
@@ -226,7 +187,6 @@ app.get("/gnews", async (req, res) => {
           .join("\n\n");
       }
     } catch {
-      // если формат внезапно не JSON — отдадим как есть
       out = text;
     }
 
@@ -235,11 +195,58 @@ app.get("/gnews", async (req, res) => {
       .set("Cache-Control", "no-store")
       .send(out);
   } catch (err) {
-    console.error("💥 GNEWS ERROR:", err);
     res
       .status(500)
       .type("text/plain; charset=utf-8")
       .send("Ошибка при запросе к GNews");
+  }
+});
+
+/**
+ * 3) Яндекс.Словарь (GET /yadict)
+ */
+app.get("/yadict", async (req, res) => {
+  try {
+    const word = (req.query.word ?? "").trim();
+    if (!word) {
+      return res.status(400).json({ error: "Параметр word обязателен" });
+    }
+
+    const url = `https://dictionary.yandex.net/api/v1/dicservice.json/lookup?key=${process.env.YADICT_KEY}&lang=ru-ru&text=${encodeURIComponent(word)}`;
+
+    const upstream = await fetch(url);
+    const data = await upstream.json();
+
+    let частьРечи = "";
+    let значение = "";
+    let синонимы = [];
+    let примеры = [];
+
+    if (data.def && data.def[0]) {
+      const def = data.def[0];
+      частьРечи = def.pos || "";
+
+      if (def.tr && def.tr[0]) {
+        значение = def.tr[0].text || "";
+        if (def.tr[0].syn) {
+          синонимы = def.tr[0].syn.map(s => s.text);
+        }
+        if (def.tr[0].ex) {
+          примеры = def.tr[0].ex.map(e => e.text).slice(0, 2);
+        }
+      }
+    }
+
+    res.json({
+      слово: word,
+      часть_речи: частьРечи,
+      значение,
+      синонимы: синонимы.join(", "),
+      пример1: примеры[0] || "",
+      пример2: примеры[1] || ""
+    });
+  } catch (e) {
+    res.status(500).json({ error: "Ошибка при запросе к Яндекс.Словарю" });
   }
 });
 
