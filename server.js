@@ -1,11 +1,10 @@
 // src/server.js
 import express from "express";
 import cors from "cors";
-import fetch from "node-fetch";
 
 const app = express();
 
-// CORS и парсинг JSON
+// CORS и парсинг JSON (на всякий случай для любого content-type)
 app.use(cors());
 app.use(express.json({ type: "*/*", limit: "1mb" }));
 
@@ -15,19 +14,31 @@ app.get("/health", (req, res) => {
 });
 
 /**
- * 1) Прокси для OpenRouter / ChatGPT
+ * 1) Главный прокси для OpenRouter (POST /?url=...)
+ *    — оставил как было, текст ответа вычищается для Watbot
  */
 app.post("/", async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) {
-    return res.status(400).type("text/plain; charset=utf-8")
+    return res
+      .status(400)
+      .type("text/plain; charset=utf-8")
       .send("Ошибка: укажи параметр ?url=");
   }
 
   try {
+    console.log("➡ INCOMING:", {
+      method: req.method,
+      url: targetUrl,
+      headers: req.headers,
+      bodyType: typeof req.body
+    });
+
+    // пробрасываем только нужные заголовки
     const allow = ["authorization", "content-type", "x-title", "http-referer", "referer", "accept"];
     const headersToForward = {};
     for (const k of allow) if (req.headers[k]) headersToForward[k] = req.headers[k];
+
     if (!headersToForward["content-type"]) {
       headersToForward["content-type"] = "application/json";
     }
@@ -41,25 +52,38 @@ app.post("/", async (req, res) => {
     });
 
     const rawText = await upstream.text();
+    console.log("⬅ UPSTREAM STATUS:", upstream.status);
+    console.log("⬅ UPSTREAM RAW:", rawText.slice(0, 800));
+
+    // извлекаем чистый текст из chat-completions
     let out = rawText;
     try {
       const data = JSON.parse(rawText);
       if (data?.choices?.[0]?.message?.content) out = data.choices[0].message.content;
       else if (data?.choices?.[0]?.text) out = data.choices[0].text;
       else if (typeof data === "string") out = data;
-    } catch {}
-    res.status(upstream.ok ? 200 : upstream.status)
+    } catch {
+      // это не JSON — отдаём как есть
+    }
+
+    res
+      .status(upstream.ok ? 200 : upstream.status)
       .type("text/plain; charset=utf-8")
       .send(out);
   } catch (e) {
     console.error("💥 PROXY ERROR:", e);
-    res.status(500).type("text/plain; charset=utf-8")
-      .send("Ошибка на прокси-сервере");
+    res.status(500).type("text/plain; charset=utf-8").send("Ошибка на прокси-сервере");
   }
 });
 
 /**
- * 2) Новости через GNews
+ * 2) Специальный маршрут для GNews (GET /gnews)
+ *    Параметры:
+ *      - cat: строка. Если "ГЗ" → top-headlines, иначе search по cat (или q)
+ *      - q:   необязательный ручной запрос. Если есть — берём его вместо cat
+ *      - lang, country, max: необязательные (по умолчанию ru, ru, 5)
+ *      - token: необязательный, если не задали GNEWS_TOKEN в переменных окружения
+ *      - mode=raw → вернуть сырой JSON (иначе отдадим список заголовков текстом)
  */
 app.get("/gnews", async (req, res) => {
   try {
@@ -69,15 +93,20 @@ app.get("/gnews", async (req, res) => {
     const country = (req.query.country ?? "ru").toString();
     const max = (req.query.max ?? "5").toString();
     const mode = (req.query.mode ?? "text").toString();
-    const token = process.env.GNEWS_TOKEN || (req.query.token ?? "").toString();
 
+    const token = process.env.GNEWS_TOKEN || (req.query.token ?? "").toString();
     if (!token) {
-      return res.status(400).type("text/plain; charset=utf-8")
-        .send('Ошибка: нет API-ключа. Добавь GNEWS_TOKEN или ?token=...');
+      return res
+        .status(400)
+        .type("text/plain; charset=utf-8")
+        .send('Ошибка: нет API-ключа. Добавь переменную окружения GNEWS_TOKEN в Render или передавай ?token=...');
     }
 
+    // определяем эндпоинт и запрос
     let endpoint = "search";
     let query = qParam || cat;
+
+    // "ГЗ" → top-headlines (без q)
     if (cat === "ГЗ" || (!query && !qParam && cat === "")) {
       endpoint = "top-headlines";
     }
@@ -90,24 +119,36 @@ app.get("/gnews", async (req, res) => {
 
     if (endpoint === "search") {
       if (!query) {
-        return res.status(400).type("text/plain; charset=utf-8")
-          .send('Ошибка: параметр q обязателен для поиска.');
+        return res
+          .status(400)
+          .type("text/plain; charset=utf-8")
+          .send('Ошибка: параметр q обязателен для /search. Передай ?q=... или ?cat=... (кроме "ГЗ").');
       }
+      // URLSearchParams сам закодирует Unicode
       params.set("q", query);
     }
 
     const finalUrl = `https://gnews.io/api/v4/${endpoint}?${params.toString()}`;
-    const upstream = await fetch(finalUrl);
-    const text = await upstream.text();
+    console.log("🔎 GNEWS URL:", finalUrl.replace(token, "****"));
 
+    const upstream = await fetch(finalUrl, {
+      method: "GET",
+      headers: { "Accept": "application/json" }
+    });
+
+    const text = await upstream.text();
     if (!upstream.ok) {
+      // пробрасываем текст ошибки как есть (чтобы видеть ответ GNews)
       return res.status(upstream.status).type("text/plain; charset=utf-8").send(text);
     }
 
+    // режим: сырой JSON (если нужен)
     if (mode === "raw") {
-      return res.type("application/json; charset=utf-8").send(text);
+      res.type("application/json; charset=utf-8").send(text);
+      return;
     }
 
+    // обычный режим: делаем человекочитаемый список заголовков
     let out = "";
     try {
       const data = JSON.parse(text);
@@ -115,7 +156,8 @@ app.get("/gnews", async (req, res) => {
       if (list.length === 0) {
         out = "Новости не найдены.";
       } else {
-        out = list.slice(0, Number(max) || 5)
+        out = list
+          .slice(0, Number(max) || 5)
           .map((a, i) => {
             const title = a?.title ?? "Без заголовка";
             const src = a?.source?.name ? ` — ${a.source.name}` : "";
@@ -125,71 +167,14 @@ app.get("/gnews", async (req, res) => {
           .join("\n\n");
       }
     } catch {
+      // если вдруг формат изменился — отдадим как есть
       out = text;
     }
+
     res.type("text/plain; charset=utf-8").send(out);
   } catch (err) {
     console.error("💥 GNEWS ERROR:", err);
     res.status(500).type("text/plain; charset=utf-8").send("Ошибка при запросе к GNews");
-  }
-});
-
-/**
- * 3) Словарь через Викисловарь
- *    GET /dict?word=СЛОВО
- */
-app.get("/dict", async (req, res) => {
-  const word = (req.query.word ?? "").toString().trim();
-  if (!word) {
-    return res.status(400).type("text/plain; charset=utf-8")
-      .send("Ошибка: передайте ?word=...");
-  }
-
-  try {
-    const url = `https://ru.wiktionary.org/w/api.php?action=query&titles=${encodeURIComponent(word)}&prop=extracts&explaintext=1&format=json`;
-    const r = await fetch(url);
-    const data = await r.json();
-
-    const pages = data?.query?.pages || {};
-    const page = Object.values(pages)[0];
-    const text = page?.extract || "";
-
-    let partOfSpeech = "";
-    let definition = "";
-    let synonyms = "";
-    let example1 = "";
-    let example2 = "";
-
-    const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
-    for (let i = 0; i < lines.length; i++) {
-      if (!partOfSpeech && /часть речи/i.test(lines[i])) {
-        partOfSpeech = lines[i];
-      }
-      if (!definition && lines[i].match(/^\d+\./)) {
-        definition = lines[i].replace(/^\d+\.\s*/, "");
-      }
-      if (/Синонимы/i.test(lines[i])) {
-        synonyms = lines[i + 1] || "";
-      }
-      if (lines[i].startsWith("Пример")) {
-        if (!example1) example1 = lines[i];
-        else if (!example2) example2 = lines[i];
-      }
-    }
-
-    const output =
-`📚 ${word}
-Часть речи: ${partOfSpeech || "-"}
-Толкование: ${definition || "-"}
-Синонимы: ${synonyms || "-"}
-Пример 1: ${example1 || "-"}
-Пример 2: ${example2 || "-"}`;
-
-    res.type("text/plain; charset=utf-8").send(output);
-  } catch (err) {
-    console.error("💥 DICT ERROR:", err);
-    res.status(500).type("text/plain; charset=utf-8")
-      .send("Ошибка при запросе к Викисловарю");
   }
 });
 
@@ -198,4 +183,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ watbot-proxy listening on ${PORT}`);
 });
-
