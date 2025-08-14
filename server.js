@@ -1,25 +1,33 @@
 import express from "express";
 import cors from "cors";
 
+// В Node 18+ fetch уже встроен, node-fetch подключать не нужно.
 const app = express();
 
-app.use(cors());
-app.use(express.json({ type: "*/*", limit: "1mb" }));
-
-// Health-check
+// Простая проверка живости
 app.get("/health", (req, res) => {
-  res.type("text/plain; charset=utf-8").send(`ok ${new Date().toISOString()}`);
+  res
+    .type("text/plain; charset=utf-8")
+    .send(ok ${new Date().toISOString()});
 });
 
-// Главный прокси
+app.use(cors());
+
+// Парсим JSON даже если Content-Type странный
+app.use(express.json({ type: "/", limit: "1mb" }));
+
+// Главный прокси-эндпоинт
 app.post("/", async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) {
-    return res.status(400).type("text/plain; charset=utf-8")
+    return res
+      .status(400)
+      .type("text/plain; charset=utf-8")
       .send("Ошибка: укажи параметр ?url=");
   }
 
   try {
+    // Логи входящего запроса от Watbot
     console.log("➡ INCOMING from Watbot:", {
       method: req.method,
       url: targetUrl,
@@ -27,6 +35,7 @@ app.post("/", async (req, res) => {
       body: req.body
     });
 
+    // Пробрасываем только нужные заголовки
     const headersToForward = {};
     const allow = [
       "authorization",
@@ -40,13 +49,16 @@ app.post("/", async (req, res) => {
       if (req.headers[k]) headersToForward[k] = req.headers[k];
     }
 
+    // Если Content-Type не задан — выставим JSON
     if (!headersToForward["content-type"]) {
       headersToForward["content-type"] = "application/json";
     }
 
+    // Тело запроса в строку
     const bodyString =
       typeof req.body === "string" ? req.body : JSON.stringify(req.body);
 
+    // Запрос к целевому API
     const upstream = await fetch(targetUrl, {
       method: "POST",
       headers: headersToForward,
@@ -55,9 +67,11 @@ app.post("/", async (req, res) => {
 
     const rawText = await upstream.text();
 
+    // Лог ответа апстрима (обрезаем для читаемости)
     console.log("⬅ UPSTREAM STATUS:", upstream.status);
     console.log("⬅ UPSTREAM RAW:", rawText.slice(0, 800));
 
+    // Пытаемся вытащить «чистый текст» (для Chat Completions)
     let out = rawText;
     try {
       const data = JSON.parse(rawText);
@@ -65,26 +79,30 @@ app.post("/", async (req, res) => {
         out = data.choices[0].message.content;
       } else if (data.choices?.[0]?.text) {
         out = data.choices[0].text;
+      } else if (typeof data === "string") {
+        out = data;
       }
     } catch {
-      // не JSON — оставляем как есть
+      // не JSON — отдаём как есть
     }
 
-    // Возвращаем так, чтобы Watbot мог распарсить
     res
       .status(upstream.ok ? 200 : upstream.status)
       .type("text/plain; charset=utf-8")
-      .send(`var_result=${out}`);
+      .send(out);
 
   } catch (e) {
     console.error("💥 PROXY ERROR:", e);
-    res.status(500).type("text/plain; charset=utf-8")
+    res
+      .status(500)
+      .type("text/plain; charset=utf-8")
       .send("Ошибка на прокси-сервере");
   }
 });
 
+// Запуск
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ watbot-proxy listening on ${PORT}`);
+  console.log(✅ watbot-proxy listening on ${PORT});
 });
 
