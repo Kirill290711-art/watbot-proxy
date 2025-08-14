@@ -4,6 +4,9 @@ import cors from "cors";
 
 const app = express();
 
+// Память для уже показанных новостей (общая для всех запросов)
+const shownNewsUrls = new Set();
+
 // CORS и парсинг JSON
 app.use(cors());
 app.use(express.json({ type: "/", limit: "1mb" }));
@@ -113,65 +116,64 @@ app.get("/gnews", async (req, res) => {
     let endpoint = "search";
     let query = qParam || cat;
 
-    if (cat === "ГЗ" || (!query && !qParam && cat === "")) {
+    // Если категория — главные заголовки, то q не нужен
+    if (cat.toLowerCase() === "главные заголовки") {
       endpoint = "top-headlines";
-      query = ""; // для главных заголовков q не нужен
+      query = "";
     }
 
-    const params = new URLSearchParams();
-    params.set("lang", lang);
-    params.set("country", country);
-    params.set("max", max);
-    params.set("token", token);
+    let articles = [];
+    let attempts = 0;
 
-    // Рандомная страница 1–75
-    const page = Math.floor(Math.random() * 75) + 1;
-    params.set("page", page);
+    // Пробуем до 10 раз найти страницу с новыми новостями
+    while (articles.length === 0 && attempts < 10) {
+      attempts++;
 
-    if (endpoint === "search" && query) {
-      params.set("q", query);
-    }
+      const page = Math.floor(Math.random() * 75) + 1;
 
-    const finalUrl = `https://gnews.io/api/v4/${endpoint}?${params.toString()}`;
-    console.log("🔎 GNEWS URL:", finalUrl.replace(token, "[HIDDEN]"));
+      const params = new URLSearchParams();
+      params.set("lang", lang);
+      params.set("country", country);
+      params.set("max", max);
+      params.set("page", page);
+      params.set("token", token);
+      if (endpoint === "search" && query) {
+        params.set("q", query);
+      }
 
-    const upstream = await fetch(finalUrl, {
-      method: "GET",
-      headers: { Accept: "application/json" }
-    });
+      const finalUrl = `https://gnews.io/api/v4/${endpoint}?${params.toString()}`;
+      console.log("🔎 GNEWS URL:", finalUrl.replace(token, "[HIDDEN]"));
 
-    const text = await upstream.text();
-    if (!upstream.ok) {
-      return res
-        .status(upstream.status)
-        .type("text/plain; charset=utf-8")
-        .send(text);
-    }
+      const upstream = await fetch(finalUrl, {
+        method: "GET",
+        headers: { Accept: "application/json" }
+      });
+      if (!upstream.ok) break;
 
-    if (mode === "raw") {
-      res.type("application/json; charset=utf-8").send(text);
-      return;
+      const data = await upstream.json();
+      if (Array.isArray(data?.articles)) {
+        const fresh = data.articles.filter(a => !shownNewsUrls.has(a.url));
+        if (fresh.length > 0) {
+          articles = fresh;
+          fresh.forEach(a => shownNewsUrls.add(a.url));
+        }
+      }
     }
 
     let out = "";
-    try {
-      const data = JSON.parse(text);
-      const list = Array.isArray(data?.articles) ? data.articles : [];
-      if (list.length === 0) {
-        out = "Новости не найдены.";
-      } else {
-        out = list
-          .slice(0, Number(max) || 5)
-          .map((a, i) => {
-            const title = a?.title ?? "Без заголовка";
-            const src = a?.source?.name ? ` — ${a.source.name}` : "";
-            const url = a?.url ?? "";
-            return `${i + 1}. ${title}${src}\n${url}`;
-          })
-          .join("\n\n");
-      }
-    } catch {
-      out = text;
+    if (articles.length === 0) {
+      shownNewsUrls.clear();
+      out = "Новости не найдены или все уже были показаны.";
+    } else {
+      out = articles
+        .slice(0, Number(max) || 5)
+        .map((a, i) => {
+          const title = a?.title ?? "Без заголовка";
+          const src = a?.source?.name ? ` — ${a.source.name}` : "";
+          const url = a?.url ?? "";
+          return `${i + 1}. ${title}${src}\n${url}`;
+        })
+        .join("\n\n");
     }
 
     res.type("text/plain; charset=utf-8").send(out);
@@ -187,8 +189,7 @@ app.get("/gnews", async (req, res) => {
 // Запуск
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ watbot-proxy listening on ${PORT}`);
-});
+  console.log(`✅ watbot-proxy listening on ${PORT}
 
 
 
