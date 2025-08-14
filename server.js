@@ -1,12 +1,13 @@
 // src/server.js
 import express from "express";
 import cors from "cors";
+import fetch from "node-fetch";
 
 const app = express();
 
-// Middleware
+// CORS и парсинг JSON
 app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ type: "*/*", limit: "1mb" }));
 
 // Проверка живости
 app.get("/health", (req, res) => {
@@ -14,12 +15,13 @@ app.get("/health", (req, res) => {
 });
 
 /**
- * 1) Прокси для OpenRouter (ChatGPT)
+ * 1) Прокси для OpenRouter / ChatGPT
  */
 app.post("/", async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) {
-    return res.status(400).send("Ошибка: укажи параметр ?url=");
+    return res.status(400).type("text/plain; charset=utf-8")
+      .send("Ошибка: укажи параметр ?url=");
   }
 
   try {
@@ -44,33 +46,34 @@ app.post("/", async (req, res) => {
       const data = JSON.parse(rawText);
       if (data?.choices?.[0]?.message?.content) out = data.choices[0].message.content;
       else if (data?.choices?.[0]?.text) out = data.choices[0].text;
+      else if (typeof data === "string") out = data;
     } catch {}
-
-    res
-      .status(upstream.ok ? 200 : upstream.status)
+    res.status(upstream.ok ? 200 : upstream.status)
       .type("text/plain; charset=utf-8")
       .send(out);
   } catch (e) {
     console.error("💥 PROXY ERROR:", e);
-    res.status(500).send("Ошибка на прокси-сервере");
+    res.status(500).type("text/plain; charset=utf-8")
+      .send("Ошибка на прокси-сервере");
   }
 });
 
 /**
- * 2) Новости (GNews API)
+ * 2) Новости через GNews
  */
 app.get("/gnews", async (req, res) => {
   try {
-    const cat = (req.query.cat ?? "").trim();
-    const qParam = (req.query.q ?? "").trim();
-    const lang = req.query.lang ?? "ru";
-    const country = req.query.country ?? "ru";
-    const max = req.query.max ?? "5";
-    const mode = req.query.mode ?? "text";
+    const cat = (req.query.cat ?? "").toString().trim();
+    const qParam = (req.query.q ?? "").toString().trim();
+    const lang = (req.query.lang ?? "ru").toString();
+    const country = (req.query.country ?? "ru").toString();
+    const max = (req.query.max ?? "5").toString();
+    const mode = (req.query.mode ?? "text").toString();
+    const token = process.env.GNEWS_TOKEN || (req.query.token ?? "").toString();
 
-    const token = process.env.GNEWS_TOKEN || req.query.token;
     if (!token) {
-      return res.status(400).send("Ошибка: нет API-ключа GNews");
+      return res.status(400).type("text/plain; charset=utf-8")
+        .send('Ошибка: нет API-ключа. Добавь GNEWS_TOKEN или ?token=...');
     }
 
     let endpoint = "search";
@@ -87,7 +90,8 @@ app.get("/gnews", async (req, res) => {
 
     if (endpoint === "search") {
       if (!query) {
-        return res.status(400).send("Ошибка: параметр q обязателен для поиска");
+        return res.status(400).type("text/plain; charset=utf-8")
+          .send('Ошибка: параметр q обязателен для поиска.');
       }
       params.set("q", query);
     }
@@ -97,7 +101,7 @@ app.get("/gnews", async (req, res) => {
     const text = await upstream.text();
 
     if (!upstream.ok) {
-      return res.status(upstream.status).send(text);
+      return res.status(upstream.status).type("text/plain; charset=utf-8").send(text);
     }
 
     if (mode === "raw") {
@@ -108,10 +112,10 @@ app.get("/gnews", async (req, res) => {
     try {
       const data = JSON.parse(text);
       const list = Array.isArray(data?.articles) ? data.articles : [];
-      if (list.length === 0) out = "Новости не найдены.";
-      else {
-        out = list
-          .slice(0, Number(max))
+      if (list.length === 0) {
+        out = "Новости не найдены.";
+      } else {
+        out = list.slice(0, Number(max) || 5)
           .map((a, i) => {
             const title = a?.title ?? "Без заголовка";
             const src = a?.source?.name ? ` — ${a.source.name}` : "";
@@ -123,52 +127,69 @@ app.get("/gnews", async (req, res) => {
     } catch {
       out = text;
     }
-
     res.type("text/plain; charset=utf-8").send(out);
   } catch (err) {
     console.error("💥 GNEWS ERROR:", err);
-    res.status(500).send("Ошибка при запросе к GNews");
+    res.status(500).type("text/plain; charset=utf-8").send("Ошибка при запросе к GNews");
   }
 });
 
 /**
- * 3) Словарь (Wiktionary API)
+ * 3) Словарь через Викисловарь
+ *    GET /dict?word=СЛОВО
  */
 app.get("/dict", async (req, res) => {
-  const word = (req.query.word ?? "").trim();
+  const word = (req.query.word ?? "").toString().trim();
   if (!word) {
-    return res.status(400).send("Ошибка: укажи ?word=...");
+    return res.status(400).type("text/plain; charset=utf-8")
+      .send("Ошибка: передайте ?word=...");
   }
 
   try {
-    const url = `https://ru.wiktionary.org/w/api.php?action=query&prop=extracts&titles=${encodeURIComponent(word)}&format=json&explaintext=1`;
-    const upstream = await fetch(url);
-    const data = await upstream.json();
+    const url = `https://ru.wiktionary.org/w/api.php?action=query&titles=${encodeURIComponent(word)}&prop=extracts&explaintext=1&format=json`;
+    const r = await fetch(url);
+    const data = await r.json();
 
     const pages = data?.query?.pages || {};
     const page = Object.values(pages)[0];
-    if (!page?.extract) {
-      return res.status(404).send("Слово не найдено");
+    const text = page?.extract || "";
+
+    let partOfSpeech = "";
+    let definition = "";
+    let synonyms = "";
+    let example1 = "";
+    let example2 = "";
+
+    const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+    for (let i = 0; i < lines.length; i++) {
+      if (!partOfSpeech && /часть речи/i.test(lines[i])) {
+        partOfSpeech = lines[i];
+      }
+      if (!definition && lines[i].match(/^\d+\./)) {
+        definition = lines[i].replace(/^\d+\.\s*/, "");
+      }
+      if (/Синонимы/i.test(lines[i])) {
+        synonyms = lines[i + 1] || "";
+      }
+      if (lines[i].startsWith("Пример")) {
+        if (!example1) example1 = lines[i];
+        else if (!example2) example2 = lines[i];
+      }
     }
 
-    // Здесь нужно будет сделать парсинг, я упрощаю пример:
-    const partOfSpeech = "—"; // можно извлечь из текста
-    const definition = page.extract.split("\n")[1] || "—";
-    const synonyms = "—"; // нет в API напрямую
-    const example1 = "—";
-    const example2 = "—";
+    const output =
+`📚 ${word}
+Часть речи: ${partOfSpeech || "-"}
+Толкование: ${definition || "-"}
+Синонимы: ${synonyms || "-"}
+Пример 1: ${example1 || "-"}
+Пример 2: ${example2 || "-"}`;
 
-    const out = `📚 ${word}
-Часть речи: ${partOfSpeech}
-Толкование: ${definition}
-Синонимы: ${synonyms}
-Пример 1: ${example1}
-Пример 2: ${example2}`;
-
-    res.type("text/plain; charset=utf-8").send(out);
+    res.type("text/plain; charset=utf-8").send(output);
   } catch (err) {
     console.error("💥 DICT ERROR:", err);
-    res.status(500).send("Ошибка при запросе к словарю");
+    res.status(500).type("text/plain; charset=utf-8")
+      .send("Ошибка при запросе к Викисловарю");
   }
 });
 
