@@ -1,47 +1,33 @@
 // src/server.js
 import express from "express";
 import cors from "cors";
-import axios from "axios";
-import cheerio from "cheerio";
+import fetch from "node-fetch";
 
 const app = express();
 
-// CORS и парсинг JSON
+// --- Общие настройки ---
 app.use(cors());
 app.use(express.json({ type: "*/*", limit: "1mb" }));
 
-// Проверка живости
+// --- Проверка живости ---
 app.get("/health", (req, res) => {
   res.type("text/plain; charset=utf-8").send(`ok ${new Date().toISOString()}`);
 });
 
-/**
- * ===============================
- * 1) Главный прокси для OpenRouter (POST /?url=...)
- * ===============================
- */
+// ----------------- 1) Прокси для ChatGPT / OpenRouter -----------------
 app.post("/", async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) {
-    return res
-      .status(400)
-      .type("text/plain; charset=utf-8")
+    return res.status(400).type("text/plain; charset=utf-8")
       .send("Ошибка: укажи параметр ?url=");
   }
 
   try {
-    console.log("➡ INCOMING:", {
-      method: req.method,
-      url: targetUrl,
-      headers: req.headers,
-      bodyType: typeof req.body
-    });
-
-    // пробрасываем только нужные заголовки
     const allow = ["authorization", "content-type", "x-title", "http-referer", "referer", "accept"];
     const headersToForward = {};
-    for (const k of allow) if (req.headers[k]) headersToForward[k] = req.headers[k];
-
+    for (const k of allow) {
+      if (req.headers[k]) headersToForward[k] = req.headers[k];
+    }
     if (!headersToForward["content-type"]) {
       headersToForward["content-type"] = "application/json";
     }
@@ -55,10 +41,7 @@ app.post("/", async (req, res) => {
     });
 
     const rawText = await upstream.text();
-    console.log("⬅ UPSTREAM STATUS:", upstream.status);
-    console.log("⬅ UPSTREAM RAW:", rawText.slice(0, 800));
 
-    // извлекаем чистый текст из chat-completions
     let out = rawText;
     try {
       const data = JSON.parse(rawText);
@@ -66,24 +49,20 @@ app.post("/", async (req, res) => {
       else if (data?.choices?.[0]?.text) out = data.choices[0].text;
       else if (typeof data === "string") out = data;
     } catch {
-      // это не JSON — отдаём как есть
+      // не JSON — отдаем как есть
     }
 
-    res
-      .status(upstream.ok ? 200 : upstream.status)
+    res.status(upstream.ok ? 200 : upstream.status)
       .type("text/plain; charset=utf-8")
       .send(out);
   } catch (e) {
     console.error("💥 PROXY ERROR:", e);
-    res.status(500).type("text/plain; charset=utf-8").send("Ошибка на прокси-сервере");
+    res.status(500).type("text/plain; charset=utf-8")
+      .send("Ошибка на прокси-сервере");
   }
 });
 
-/**
- * ===============================
- * 2) Новости GNews
- * ===============================
- */
+// ----------------- 2) Новости GNews -----------------
 app.get("/gnews", async (req, res) => {
   try {
     const cat = (req.query.cat ?? "").toString().trim();
@@ -95,14 +74,13 @@ app.get("/gnews", async (req, res) => {
 
     const token = process.env.GNEWS_TOKEN || (req.query.token ?? "").toString();
     if (!token) {
-      return res
-        .status(400)
-        .type("text/plain; charset=utf-8")
-        .send('Ошибка: нет API-ключа. Добавь переменную окружения GNEWS_TOKEN в Render или передавай ?token=...');
+      return res.status(400).type("text/plain; charset=utf-8")
+        .send('Ошибка: нет API-ключа. Добавь GNEWS_TOKEN в Render или передавай ?token=...');
     }
 
     let endpoint = "search";
     let query = qParam || cat;
+
     if (cat === "ГЗ" || (!query && !qParam && cat === "")) {
       endpoint = "top-headlines";
     }
@@ -115,23 +93,17 @@ app.get("/gnews", async (req, res) => {
 
     if (endpoint === "search") {
       if (!query) {
-        return res
-          .status(400)
-          .type("text/plain; charset=utf-8")
-          .send('Ошибка: параметр q обязателен для /search. Передай ?q=... или ?cat=... (кроме "ГЗ").');
+        return res.status(400).type("text/plain; charset=utf-8")
+          .send('Ошибка: параметр q обязателен для /search.');
       }
       params.set("q", query);
     }
 
     const finalUrl = `https://gnews.io/api/v4/${endpoint}?${params.toString()}`;
-    console.log("🔎 GNEWS URL:", finalUrl.replace(token, ""));
-
-    const upstream = await fetch(finalUrl, { method: "GET", headers: { "Accept": "application/json" } });
+    const upstream = await fetch(finalUrl, { method: "GET" });
 
     const text = await upstream.text();
-    if (!upstream.ok) {
-      return res.status(upstream.status).type("text/plain; charset=utf-8").send(text);
-    }
+    if (!upstream.ok) return res.status(upstream.status).send(text);
 
     if (mode === "raw") {
       res.type("application/json; charset=utf-8").send(text);
@@ -142,9 +114,8 @@ app.get("/gnews", async (req, res) => {
     try {
       const data = JSON.parse(text);
       const list = Array.isArray(data?.articles) ? data.articles : [];
-      if (list.length === 0) {
-        out = "Новости не найдены.";
-      } else {
+      if (list.length === 0) out = "Новости не найдены.";
+      else {
         out = list
           .slice(0, Number(max) || 5)
           .map((a, i) => {
@@ -162,125 +133,66 @@ app.get("/gnews", async (req, res) => {
     res.type("text/plain; charset=utf-8").send(out);
   } catch (err) {
     console.error("💥 GNEWS ERROR:", err);
-    res.status(500).type("text/plain; charset=utf-8").send("Ошибка при запросе к GNews");
+    res.status(500).send("Ошибка при запросе к GNews");
   }
 });
 
-/**
- * ===============================
- * 3) Словарь (Викисловарь, русский)
- * ===============================
- */
-async function parseWiktionary(word) {
-  try {
-    const url = `https://ru.wiktionary.org/wiki/${encodeURIComponent(word)}`;
-    const { data } = await axios.get(url);
-    const $ = cheerio.load(data);
+// ----------------- 3) Словарь Wiktionary -----------------
+app.get("/dict", async (req, res) => {
+  const word = (req.query.word ?? "").toString().trim();
+  if (!word) {
+    return res.status(400).type("text/plain; charset=utf-8")
+      .send("Ошибка: укажи параметр ?word=...");
+  }
 
+  try {
+    const url = `https://ru.wiktionary.org/w/api.php?action=query&prop=extracts&explaintext=1&titles=${encodeURIComponent(word)}&format=json`;
+    const response = await fetch(url);
+    const data = await response.json();
+
+    const pages = data.query.pages;
+    const firstPage = Object.values(pages)[0];
+    const extract = firstPage.extract || "Не найдено.";
+
+    // Простейший парсинг
+    const lines = extract.split("\n").map(l => l.trim()).filter(l => l);
     let partOfSpeech = "";
     let definition = "";
     let synonyms = [];
     let examples = [];
 
-    const posElem = $("span.mw-headline").filter((i, el) => {
-      const text = $(el).text().toLowerCase();
-      return (
-        text.includes("существительное") ||
-        text.includes("глагол") ||
-        text.includes("прилагательное") ||
-        text.includes("наречие") ||
-        text.includes("местоимение") ||
-        text.includes("числительное")
-      );
-    }).first();
-    if (posElem.length) {
-      partOfSpeech = posElem.text();
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].toLowerCase();
+      if (!partOfSpeech && /часть речи/i.test(lines[i])) {
+        partOfSpeech = lines[i + 1] || "";
+      }
+      if (!definition && /^[0-9]+\./.test(lines[i])) {
+        definition = lines[i].replace(/^[0-9]+\.\s*/, "");
+      }
+      if (/синонимы/i.test(lines[i])) {
+        synonyms = (lines[i + 1] || "").split(/[;,]/).map(s => s.trim());
+      }
+      if (/пример/i.test(lines[i]) || lines[i].startsWith("♦")) {
+        examples.push(lines[i + 1] || "");
+      }
     }
 
-    $("span.mw-headline").each((i, el) => {
-      if ($(el).text().toLowerCase().includes("значение")) {
-        const list = $(el).parent().next("ol").find("li");
-        if (list.length) {
-          definition = $(list[0]).text().trim();
-        }
-      }
-    });
+    const out = `📚 ${word}
+Часть речи: ${partOfSpeech || "—"}
+Толкование: ${definition || "—"}
+Синонимы: ${synonyms.length ? synonyms.join(", ") : "—"}
+Пример 1: ${examples[0] || "—"}
+Пример 2: ${examples[1] || "—"}`;
 
-    $("span.mw-headline").each((i, el) => {
-      if ($(el).text().toLowerCase().includes("синонимы")) {
-        $(el).parent().next("ul").find("li").each((j, li) => {
-          synonyms.push($(li).text().trim());
-        });
-      }
-    });
-
-    $("dl dd").each((i, el) => {
-      if (examples.length < 2) {
-        examples.push($(el).text().trim());
-      }
-    });
-
-    return {
-      частьРечи: partOfSpeech || "—",
-      толкование: definition || "—",
-      синонимы: synonyms.join(", ") || "—",
-      пример1: examples[0] || "—",
-      пример2: examples[1] || "—"
-    };
-
-  } catch (error) {
-    console.error("Ошибка парсинга:", error.message);
-    return {
-      частьРечи: "—",
-      толкование: "—",
-      синонимы: "—",
-      пример1: "—",
-      пример2: "—"
-    };
-  }
-}
-
-app.get("/yadict", async (req, res) => {
-  const word = req.query.word;
-  if (!word) {
-    return res.status(400).json({ error: "Не указано слово" });
-  }
-  const result = await parseWiktionary(word);
-  res.json(result);
-});
-
-/**
- * ===============================
- * 4) ChatGPT (через OpenAI API)
- * ===============================
- */
-app.get("/gpt", async (req, res) => {
-  const prompt = req.query.prompt;
-  if (!prompt) {
-    return res.status(400).json({ error: "Нет запроса" });
-  }
-
-  try {
-    const { data } = await axios.post("https://api.openai.com/v1/chat/completions", {
-      model: "gpt-3.5-turbo",
-      messages: [{ role: "user", content: prompt }]
-    }, {
-      headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      }
-    });
-
-    res.json({ answer: data.choices[0].message.content.trim() });
-  } catch (error) {
-    console.error("Ошибка GPT:", error.message);
-    res.status(500).json({ error: "Ошибка при запросе к ChatGPT" });
+    res.type("text/plain; charset=utf-8").send(out);
+  } catch (err) {
+    console.error("💥 DICT ERROR:", err);
+    res.status(500).type("text/plain; charset=utf-8")
+      .send("Ошибка при запросе к Викисловарю");
   }
 });
 
-// ===============================
-// Запуск сервера
-// ===============================
+// --- Запуск сервера ---
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ watbot-proxy listening on ${PORT}`);
