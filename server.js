@@ -4,21 +4,18 @@ import cors from "cors";
 
 const app = express();
 
-// Память для уже показанных новостей (общая для всех запросов)
-const shownNewsUrls = new Set();
+// Храним показанные новости по ключу запроса
+const shownByKey = new Map();
 
-// CORS и парсинг JSON
 app.use(cors());
 app.use(express.json({ type: "/", limit: "1mb" }));
 
-// Проверка живости
+// Health-check
 app.get("/health", (req, res) => {
   res.type("text/plain; charset=utf-8").send(`ok ${new Date().toISOString()}`);
 });
 
-/**
- * 1) Главный прокси для OpenRouter (POST /?url=...)
- */
+// Прокси для OpenRouter
 app.post("/", async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) {
@@ -29,13 +26,6 @@ app.post("/", async (req, res) => {
   }
 
   try {
-    console.log("➡ INCOMING:", {
-      method: req.method,
-      url: targetUrl,
-      headers: req.headers,
-      bodyType: typeof req.body
-    });
-
     const allow = [
       "authorization",
       "content-type",
@@ -48,7 +38,6 @@ app.post("/", async (req, res) => {
     for (const k of allow) {
       if (req.headers[k]) headersToForward[k] = req.headers[k];
     }
-
     if (!headersToForward["content-type"]) {
       headersToForward["content-type"] = "application/json";
     }
@@ -63,20 +52,17 @@ app.post("/", async (req, res) => {
     });
 
     const rawText = await upstream.text();
-    console.log("⬅ UPSTREAM STATUS:", upstream.status);
-    console.log("⬅ UPSTREAM RAW:", rawText.slice(0, 800));
-
     let out = rawText;
     try {
       const data = JSON.parse(rawText);
-      if (data?.choices?.[0]?.message?.content)
+      if (data?.choices?.[0]?.message?.content) {
         out = data.choices[0].message.content;
-      else if (data?.choices?.[0]?.text) out = data.choices[0].text;
-      else if (typeof data === "string") out = data;
-    } catch {
-      // не JSON
-    }
-
+      } else if (data?.choices?.[0]?.text) {
+        out = data.choices[0].text;
+      } else if (typeof data === "string") {
+        out = data;
+      }
+    } catch {}
     res
       .status(upstream.ok ? 200 : upstream.status)
       .type("text/plain; charset=utf-8")
@@ -90,88 +76,99 @@ app.post("/", async (req, res) => {
   }
 });
 
-/**
- * 2) Специальный маршрут для GNews (GET /gnews)
- */
+// Новости GNews
 app.get("/gnews", async (req, res) => {
   try {
-    const cat = (req.query.cat ?? "").toString().trim();
-    const qParam = (req.query.q ?? "").toString().trim();
-    const lang = (req.query.lang ?? "ru").toString();
-    const country = (req.query.country ?? "ru").toString();
-    const max = (req.query.max ?? "5").toString();
-    const mode = (req.query.mode ?? "text").toString();
+    const cat = (req.query.cat ?? "").trim();
+    const qParam = (req.query.q ?? "").trim();
+    const lang = (req.query.lang ?? "ru").trim();
+    const country = (req.query.country ?? "ru").trim();
+    const max = Number(req.query.max ?? "5") || 5;
+    const mode = (req.query.mode ?? "text").trim();
 
     const token =
-      process.env.GNEWS_TOKEN || (req.query.token ?? "").toString();
+      process.env.GNEWS_TOKEN || (req.query.token ?? "").trim();
     if (!token) {
       return res
         .status(400)
         .type("text/plain; charset=utf-8")
-        .send(
-          'Ошибка: нет API-ключа. Добавь переменную окружения GNEWS_TOKEN или передавай ?token=...'
-        );
+        .send("Ошибка: нет API-ключа.");
     }
 
     let endpoint = "search";
     let query = qParam || cat;
-
-    // Если категория — главные заголовки, то q не нужен
-    if (cat.toLowerCase() === "главные заголовки") {
+    const normCat = cat.toLowerCase();
+    if (
+      normCat === "гз" ||
+      normCat === "главные заголовки" ||
+      (!qParam && cat === "")
+    ) {
       endpoint = "top-headlines";
       query = "";
     }
 
-    let articles = [];
-    let attempts = 0;
+    const makeParams = (pageNum) => {
+      const p = new URLSearchParams();
+      p.set("lang", lang);
+      p.set("country", country);
+      p.set("max", String(max));
+      p.set("page", String(pageNum));
+      p.set("token", token);
+      if (endpoint === "search" && query) p.set("q", query);
+      return p;
+    };
 
-    // Пробуем до 10 раз найти страницу с новыми новостями
-    while (articles.length === 0 && attempts < 10) {
-      attempts++;
-
+    if (mode === "raw") {
       const page = Math.floor(Math.random() * 75) + 1;
+      const params = makeParams(page);
+      const finalUrl = `https://gnews.io/api/v4/${endpoint}?${params}`;
+      const upstream = await fetch(finalUrl, { headers: { Accept: "application/json" } });
+      const text = await upstream.text();
+      return res
+        .status(upstream.ok ? 200 : upstream.status)
+        .type("application/json; charset=utf-8")
+        .send(text);
+    }
 
-      const params = new URLSearchParams();
-      params.set("lang", lang);
-      params.set("country", country);
-      params.set("max", max);
-      params.set("page", page);
-      params.set("token", token);
-      if (endpoint === "search" && query) {
-        params.set("q", query);
-      }
+    const key = `${endpoint}|${query}|${cat}|${lang}|${country}`;
+    if (!shownByKey.has(key)) shownByKey.set(key, new Set());
+    const seen = shownByKey.get(key);
 
-      const finalUrl = `https://gnews.io/api/v4/${endpoint}?${params.toString()}`;
-      console.log("🔎 GNEWS URL:", finalUrl.replace(token, "[HIDDEN]"));
-
-      const upstream = await fetch(finalUrl, {
-        method: "GET",
-        headers: { Accept: "application/json" }
-      });
+    let articles = [];
+    let tries = 0;
+    while (articles.length === 0 && tries < 10) {
+      tries++;
+      const page = Math.floor(Math.random() * 75) + 1;
+      const params = makeParams(page);
+      const finalUrl = `https://gnews.io/api/v4/${endpoint}?${params}`;
+      const upstream = await fetch(finalUrl, { headers: { Accept: "application/json" } });
       if (!upstream.ok) break;
 
-      const data = await upstream.json();
-      if (Array.isArray(data?.articles)) {
-        const fresh = data.articles.filter(a => !shownNewsUrls.has(a.url));
-        if (fresh.length > 0) {
-          articles = fresh;
-          fresh.forEach(a => shownNewsUrls.add(a.url));
-        }
+      let data;
+      try {
+        data = await upstream.json();
+      } catch {
+        break;
+      }
+
+      const list = Array.isArray(data?.articles) ? data.articles : [];
+      const fresh = list.filter(a => a?.url && !seen.has(a.url));
+      if (fresh.length > 0) {
+        articles = fresh.slice(0, max);
+        for (const a of articles) seen.add(a.url);
       }
     }
 
     let out = "";
     if (articles.length === 0) {
-      shownNewsUrls.clear();
+      shownByKey.delete(key);
       out = "Новости не найдены или все уже были показаны.";
     } else {
       out = articles
-        .slice(0, Number(max) || 5)
         .map((a, i) => {
           const title = a?.title ?? "Без заголовка";
           const src = a?.source?.name ? ` — ${a.source.name}` : "";
-          const url = a?.url ?? "";
-          return `${i + 1}. ${title}${src}\n${url}`;
+          return `${i + 1}. ${title}${src}\n${a.url ?? ""}`;
         })
         .join("\n\n");
     }
@@ -186,10 +183,12 @@ app.get("/gnews", async (req, res) => {
   }
 });
 
-// Запуск
+// Запуск сервера
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ watbot-proxy listening on ${PORT}
+  console.log(`✅ watbot-proxy listening on ${PORT}`);
+});
+
 
 
 
