@@ -68,7 +68,7 @@ app.post("/", async (req, res) => {
       else if (data?.choices?.[0]?.text) out = data.choices[0].text;
       else if (typeof data === "string") out = data;
     } catch {
-      // это не JSON — отдаём как получили
+      // не JSON — отдаём как есть
     }
 
     res
@@ -83,9 +83,7 @@ app.post("/", async (req, res) => {
 });
 
 // ------------------------------
-// 2) Новости GNews с анти‑повтором и рандомом страниц (1..75)
-//    GET /gnews?cat=... | q=... | lang=ru | country=ru | max=5 | mode=text|raw
-//    "ГЗ" => top-headlines
+// 2) Новости GNews с анти-повтором и рандомом страниц (1..75)
 // ------------------------------
 const lastPageMap = new Map();
 const keyFor = (endpoint, query, lang, country) => `${endpoint}|${query || ""}|${lang}|${country}`;
@@ -127,7 +125,6 @@ app.get("/gnews", async (req, res) => {
     params.set("max", max);
     params.set("token", token);
 
-    // анти‑повтор страницы для связки endpoint+query+lang+country
     const key = keyFor(endpoint, query, lang, country);
     const prev = lastPageMap.get(key) ?? null;
     const page = pickRandomPageExcept(prev, 1, 75);
@@ -144,7 +141,7 @@ app.get("/gnews", async (req, res) => {
       params.set("q", query); // Unicode сам закодируется
     }
 
-    // анти‑кэш
+    // анти-кэш
     params.set("_t", Math.random().toString(36).slice(2));
 
     const finalUrl = `https://gnews.io/api/v4/${endpoint}?${params.toString()}`;
@@ -191,32 +188,27 @@ app.get("/gnews", async (req, res) => {
 
 // ------------------------------
 // 3) Викисловарь (Русский): Часть речи, Толкование, Синонимы, 2 Примера
-//    GET /wikidict?word=слово
-//    Отдаёт ТОЛЬКО текст — готовый для отправки в чат.
+//    GET /wikidict?word=слово   (есть алиас /dict)
 // ------------------------------
+
+// --- утилиты парсинга викитекста ---
 function cleanWikitext(s) {
   if (!s) return "";
   let t = s;
 
-  // Ссылки [[страница|текст]] / [[страница]]
   t = t.replace(/\[\[([^|\]]+)\|([^|\]]+)\]\]/g, "$2");
   t = t.replace(/\[\[([^\]]+)\]\]/g, "$1");
 
-  // Внешние ссылки [url текст] / [url]
   t = t.replace(/\[(https?:\/\/[^\s\]]+)\s+([^\]]+)\]/g, "$2");
   t = t.replace(/\[(https?:\/\/[^\s\]]+)\]/g, "");
 
-  // Шаблоны {{...}} (наивно, несколько прогонов)
   for (let i = 0; i < 5; i++) t = t.replace(/\{\{[^{}]*\}\}/g, "");
 
-  // HTML-комменты и теги
   t = t.replace(/<!--[\s\S]*?-->/g, "");
   t = t.replace(/<\/?[^>]+>/g, "");
 
-  // Курсив/полужирное '' ''' ''''
   t = t.replace(/''+/g, "");
 
-  // Маркеры списков/нумерации/разделители
   t = t.replace(/^[#*:;]\s*/gm, "");
   t = t.replace(/\s*—\s*:/g, " — ");
   t = t.replace(/\s{2,}/g, " ");
@@ -225,17 +217,15 @@ function cleanWikitext(s) {
 }
 
 function sliceSection(text, startIdx) {
-  // взять подстроку от startIdx до следующего языкового == ... ==
   const rest = text.slice(startIdx);
   const reLang = /(^|\n)==\s*(?:[A-Za-zА-Яа-яЁё][^=]*|\{\{-[a-z]{2}-\}\})\s*==/g;
   reLang.lastIndex = 0;
-  const m = reLang.exec(rest.slice(1)); // пропускаем текущую строку
+  const m = reLang.exec(rest.slice(1));
   const end = m ? startIdx + 1 + m.index : text.length;
   return text.slice(startIdx, end);
 }
 
 function extractRuSection(wiki) {
-  // Ищем "== Русский ==" ИЛИ "== {{-ru-}} =="
   const reRu1 = /(^|\n)==\s*Русский\s*==/i;
   const reRu2 = /(^|\n)==\s*\{\{-ru-\}\}\s*==/i;
 
@@ -246,11 +236,9 @@ function extractRuSection(wiki) {
 }
 
 function firstPos(ru) {
-  // первая подглава уровня === ... === (обычно Существительное / Глагол и т.п.)
   const m = ru.match(/(^|\n)===\s*([^=\n]+?)\s*===/);
   if (!m) return "";
   const raw = m[2].trim();
-  // частая шумовая глава "Морфологические и синтаксические свойства" — пропустим
   if (/морфологические|синтаксические/i.test(raw)) {
     const rest = ru.slice(m.index + m[0].length);
     const m2 = rest.match(/(^|\n)===\s*([^=\n]+?)\s*===/);
@@ -260,7 +248,6 @@ function firstPos(ru) {
 }
 
 function extractBetween(ru, title) {
-  // Возвращает тело подзаголовка "==== title ====" до следующего "===="
   const reStart = new RegExp(`(^|\\n)====\\s*${title}\\s*====`);
   const m = ru.match(reStart);
   if (!m) return "";
@@ -273,7 +260,6 @@ function extractBetween(ru, title) {
 }
 
 function extractDefinition(ru) {
-  // Берём раздел "Значение": первые строки, начинающиеся с "#"
   const body = extractBetween(ru, "Значение");
   if (!body) return "";
   const defs = body
@@ -291,14 +277,11 @@ function extractSynonyms(ru) {
     .filter((l) => /^[#*]/.test(l.trim()))
     .map((l) => cleanWikitext(l))
     .filter((l) => l && !/^Антонимы/i.test(l));
-  // Иногда раздела нет — вернётся пусто
   if (!items.length) return "";
-  // Сократим до разумного количества
   return items.join(", ").replace(/\s*,\s*,/g, ",");
 }
 
 function extractExamples(ru) {
-  // 1) Явный раздел "Примеры" или "Примеры употребления"
   let body = extractBetween(ru, "Примеры употребления");
   if (!body) body = extractBetween(ru, "Примеры");
   let ex = [];
@@ -309,7 +292,6 @@ function extractExamples(ru) {
       .map((l) => cleanWikitext(l))
       .filter(Boolean);
   }
-  // 2) Если нет явного раздела — попробуем примеры после значений ("#:")
   if (ex.length < 2) {
     const m = ru.match(/(^|\n)#:\s*[^\n]+/g);
     if (m) {
@@ -321,30 +303,90 @@ function extractExamples(ru) {
   return [ex[0] || "", ex[1] || ""];
 }
 
-app.get("/wikidict", async (req, res) => {
+// --- починка кодировки из конструктора ---
+function normalizeWordFromQuery(req) {
+  let word = (req.query.word ?? "").toString();
+
+  // плюсики -> пробелы (часто встречается)
+  if (word.includes("+")) word = word.replace(/\+/g, " ");
+
+  // пробуем декодировать 1-2 раза (если пришло %D0%B3%D0%BE… или двойной encode)
+  for (let i = 0; i < 2; i++) {
+    try {
+      const d = decodeURIComponent(word);
+      if (d === word) break;
+      word = d;
+    } catch {
+      break;
+    }
+  }
+
+  // если кириллицы нет, но есть «моджибейк» (Ð Ñ Р �) — лечим latin1→utf8
+  if (!/[А-Яа-яЁё]/.test(word) && /[ÐÑ�Р]/.test(word)) {
+    const fixed = Buffer.from(word, "latin1").toString("utf8");
+    if (/[А-Яа-яЁё]/.test(fixed)) word = fixed;
+  }
+
+  return word.trim();
+}
+
+// --- получение викитекста с запасным вариантом ---
+async function fetchWikitext(word) {
+  const baseHeaders = {
+    "User-Agent": "watbot-proxy/1.0 (+render; contact: none)",
+    "Accept": "application/json"
+  };
+
+  // 1) parse + wikitext
+  {
+    const url = `https://ru.wiktionary.org/w/api.php?action=parse&page=${encodeURIComponent(
+      word
+    )}&prop=wikitext&format=json&redirects=1&origin=*`;
+    const r = await fetch(url, { headers: baseHeaders });
+    const txt = await r.text();
+    if (r.ok) {
+      try {
+        const j = JSON.parse(txt);
+        const w = j?.parse?.wikitext?.["*"];
+        if (w) return w;
+      } catch {}
+    }
+  }
+
+  // 2) fallback: revisions (иногда parse чудит)
+  {
+    const url = `https://ru.wiktionary.org/w/api.php?action=query&prop=revisions&rvprop=content&rvslots=main&format=json&redirects=1&titles=${encodeURIComponent(
+      word
+    )}&origin=*`;
+    const r = await fetch(url, { headers: baseHeaders });
+    const txt = await r.text();
+    if (r.ok) {
+      try {
+        const j = JSON.parse(txt);
+        const pages = j?.query?.pages || {};
+        for (const k of Object.keys(pages)) {
+          const revs = pages[k]?.revisions;
+          const slot = revs?.[0]?.slots?.main?.["*"];
+          if (slot) return slot;
+        }
+      } catch {}
+    }
+  }
+
+  return ""; // не нашли
+}
+
+// общий хэндлер для /wikidict и /dict
+async function wikidictHandler(req, res) {
   try {
-    const word = (req.query.word ?? "").toString().trim();
+    const word = normalizeWordFromQuery(req);
+
     if (!word) {
       return res.status(400).type("text/plain; charset=utf-8").send("Ошибка: передай ?word=слово");
     }
 
-    // Забираем WIKITEXT страницы
-    const url = `https://ru.wiktionary.org/w/api.php?action=parse&page=${encodeURIComponent(
-      word
-    )}&prop=wikitext&format=json&redirects=1`;
-    const r = await fetch(url, { headers: { "User-Agent": "watbot-proxy/1.0" } });
-    const txt = await r.text();
-    if (!r.ok) {
-      return res.status(r.status).type("text/plain; charset=utf-8").send("Не удалось получить данные.");
-    }
+    const wiki = await fetchWikitext(word);
 
-    let wiki = "";
-    try {
-      const j = JSON.parse(txt);
-      wiki = j?.parse?.wikitext?.["*"] || "";
-    } catch {
-      // если не JSON — просто пусто
-    }
     if (!wiki) {
       return res.type("text/plain; charset=utf-8").send(
         `📚 ${word}\nЧасть речи: -\nТолкование: -\nСинонимы: -\nПример 1: -\nПример 2: -`
@@ -353,26 +395,27 @@ app.get("/wikidict", async (req, res) => {
 
     const ru = extractRuSection(wiki);
     if (!ru) {
-      return res
-        .type("text/plain; charset=utf-8")
-        .send(`📚 ${word}\nЧасть речи: -\nТолкование: -\nСинонимы: -\nПример 1: -\nПример 2: -`);
+      return res.type("text/plain; charset=utf-8").send(
+        `📚 ${word}\nЧасть речи: -\nТолкование: -\nСинонимы: -\nПример 1: -\nПример 2: -`
+      );
     }
 
     const pos = firstPos(ru) || "-";
     const def = extractDefinition(ru) || "-";
     const syn = extractSynonyms(ru) || "-";
     const [ex1, ex2] = extractExamples(ru);
-    const out = `📚 ${word}\nЧасть речи: ${pos || "-"}\nТолкование: ${def || "-"}\nСинонимы: ${syn || "-"}\nПример 1: ${ex1 || "-"}\nПример 2: ${ex2 || "-"}`;
+
+    const out = `📚 ${word}\nЧасть речи: ${pos}\nТолкование: ${def}\nСинонимы: ${syn}\nПример 1: ${ex1 || "-"}\nПример 2: ${ex2 || "-"}`;
 
     res.type("text/plain; charset=utf-8").set("Cache-Control", "no-store").send(out);
   } catch (e) {
     console.error("💥 WIKIDICT ERROR:", e);
-    res
-      .status(500)
-      .type("text/plain; charset=utf-8")
-      .send("Ошибка при запросе к Викисловарю");
+    res.status(500).type("text/plain; charset=utf-8").send("Ошибка при запросе к Викисловарю");
   }
-});
+}
+
+app.get("/wikidict", wikidictHandler);
+app.get("/dict", wikidictHandler); // алиас
 
 // ------------------------------
 // Запуск
