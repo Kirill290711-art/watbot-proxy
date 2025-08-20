@@ -196,7 +196,7 @@ app.get("/gnews", async (req, res) => {
 });
 
 // ------------------------------
-// 3) Викисловарь через REST API
+// 3) СЛОВАРИ - альтернативный источник через Glosbe.com
 // ------------------------------
 
 // --- fetch с таймаутом ---
@@ -210,47 +210,25 @@ async function fetchWithTimeout(url, opts = {}, ms = 10000) {
   }
 }
 
-// --- починка кодировки и подготовка слова ---
+// --- починка кодировки ---
 function normalizeWordFromQuery(req) {
   let word = (req.query.word ?? "").toString();
-
-  // "+" -> пробел
   if (word.includes("+")) word = word.replace(/\+/g, " ");
-
-  // попытка декодировать 1–2 раза
   for (let i = 0; i < 2; i++) {
     try {
       const d = decodeURIComponent(word);
       if (d === word) break;
       word = d;
-    } catch {
-      break;
-    }
+    } catch { break; }
   }
-
-  // если «моджибейк» (Ð/Ñ/Р/�) — лечим latin1→utf8
   if (!/[А-Яа-яЁё]/.test(word) && /[ÐÑ�Р]/.test(word)) {
     const fixed = Buffer.from(word, "latin1").toString("utf8");
     if (/[А-Яа-яЁё]/.test(fixed)) word = fixed;
   }
-
   return word.trim();
 }
 
-// --- очистка текста ---
-function cleanText(text) {
-  if (!text) return "";
-  return text
-    .replace(/\[\[([^|\]]+)\|([^|\]]+)\]\]/g, "$2")
-    .replace(/\[\[([^\]]+)\]\]/g, "$1")
-    .replace(/'''/g, "")
-    .replace(/''/g, "")
-    .replace(/\{\{([^}]+)\}\}/g, "")
-    .replace(/<[^>]+>/g, "")
-    .trim();
-}
-
-// --- обработчик викисловаря ---
+// --- обработчик словаря через Glosbe ---
 async function wikidictHandler(req, res) {
   const word = normalizeWordFromQuery(req);
   
@@ -261,16 +239,17 @@ async function wikidictHandler(req, res) {
       );
     }
 
-    console.log("🔎 WIKIDICT word:", word);
+    console.log("🔎 DICT word:", word);
 
-    // Используем REST API викисловаря
-    const url = `https://ru.wiktionary.org/api/rest_v1/page/definition/${encodeURIComponent(word)}`;
+    // Используем Glosbe API для получения данных о слове
+    const url = `https://glosbe.com/gapi/translate?from=rus&dest=rus&format=json&phrase=${encodeURIComponent(word)}`;
+    
     const response = await fetchWithTimeout(url, {
       headers: {
-        'User-Agent': 'watbot-proxy/1.0 (+https://render.com)',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'application/json'
       }
-    }, 10000);
+    }, 8000);
 
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
@@ -278,41 +257,42 @@ async function wikidictHandler(req, res) {
 
     const data = await response.json();
     
-    // Извлекаем русские определения
-    const russianDefinitions = data.ru || [];
-    
-    if (russianDefinitions.length === 0) {
-      return res.status(200).type("text/plain; charset=utf-8").send(
-        `📚 ${word}\nЧасть речи: -\nТолкование: -\nСинонимы: -\nПример 1: -\nПример 2: -`
-      );
-    }
+    let partOfSpeech = "-";
+    let meaning = "-";
+    let synonyms = "-";
+    let examples = ["-", "-"];
 
-    // Берем первое определение
-    const definition = russianDefinitions[0];
-    
-    const partOfSpeech = definition.partOfSpeech || '-';
-    
-    // Извлекаем первое толкование
-    let meaning = '-';
-    if (definition.definitions && definition.definitions[0]) {
-      meaning = cleanText(definition.definitions[0].definition);
-    }
-    
-    // Извлекаем синонимы
-    let synonyms = '-';
-    if (definition.definitions && definition.definitions[0] && definition.definitions[0].synonyms) {
-      synonyms = definition.definitions[0].synonyms.map(s => cleanText(s.text)).join(', ');
-    }
-    
-    // Извлекаем примеры
-    let examples = ['-', '-'];
-    if (definition.definitions && definition.definitions[0] && definition.definitions[0].examples) {
-      examples = definition.definitions[0].examples.slice(0, 2).map(e => cleanText(e.text));
-      if (examples.length < 2) examples.push('-');
+    // Парсим данные из ответа
+    if (data.tuc && data.tuc.length > 0) {
+      const firstResult = data.tuc[0];
+      
+      // Часть речи
+      if (firstResult.meanings && firstResult.meanings.length > 0) {
+        partOfSpeech = firstResult.meanings[0].text || "-";
+      }
+      
+      // Значение
+      if (firstResult.phrases && firstResult.phrases.length > 0) {
+        meaning = firstResult.phrases[0].text || "-";
+      }
+      
+      // Синонимы (берем из дополнительных значений)
+      if (data.tuc.length > 1) {
+        const syns = data.tuc.slice(1, 4).map(item => {
+          if (item.phrases && item.phrases[0]) return item.phrases[0].text;
+          return null;
+        }).filter(Boolean);
+        if (syns.length > 0) synonyms = syns.join(", ");
+      }
+      
+      // Примеры из контекста
+      if (data.examples && data.examples.length > 0) {
+        examples = data.examples.slice(0, 2).map(ex => ex.text || "-");
+      }
     }
 
     const out = `📚 ${word}\n` +
-                `Часть речи: ${cleanText(partOfSpeech)}\n` +
+                `Часть речи: ${partOfSpeech}\n` +
                 `Толкование: ${meaning}\n` +
                 `Синонимы: ${synonyms}\n` +
                 `Пример 1: ${examples[0]}\n` +
@@ -321,9 +301,30 @@ async function wikidictHandler(req, res) {
     return res.status(200).type("text/plain; charset=utf-8").set("Cache-Control", "no-store").send(out);
 
   } catch (error) {
-    console.error("💥 WIKIDICT ERROR:", error);
+    console.error("💥 DICT ERROR:", error);
+    // Fallback на локальную базу распространенных слов
+    const commonWords = {
+      "город": ["существительное", "крупный населённый пункт", "мегаполис, поселение", "Я живу в большом городе.", "Этот город известен своими памятниками."],
+      "дом": ["существительное", "здание для жилья", "здание, жилище, строение", "Мы купили новый дом.", "Этот дом очень старый."],
+      "человек": ["существительное", "разумное живое существо", "личность, индивидуум, особа", "Человек должен быть добрым.", "Этот человек мне помог."],
+      "вода": ["существительное", "прозрачная жидкость", "жидкость, влага, H2O", "Я пью воду каждый день.", "Вода в реке холодная."],
+      "солнце": ["существительное", "звезда в центре системы", "светило, дневное светило", "Солнце светит ярко.", "Мы грелись на солнце."]
+    };
+
+    const lowerWord = word.toLowerCase();
+    if (commonWords[lowerWord]) {
+      const [pos, mean, syn, ex1, ex2] = commonWords[lowerWord];
+      const out = `📚 ${word}\n` +
+                  `Часть речи: ${pos}\n` +
+                  `Толкование: ${mean}\n` +
+                  `Синонимы: ${syn}\n` +
+                  `Пример 1: ${ex1}\n` +
+                  `Пример 2: ${ex2}`;
+      return res.status(200).type("text/plain; charset=utf-8").send(out);
+    }
+
     return res.status(200).type("text/plain; charset=utf-8").send(
-      `📚 ${word || "-"}\nЧасть речи: -\nТолкование: -\nСинонимы: -\nПример 1: -\nПример 2: -`
+      `📚 ${word}\nЧасть речи: -\nТолкование: -\nСинонимы: -\nПример 1: -\nПример 2: -`
     );
   }
 }
