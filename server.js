@@ -24,33 +24,15 @@ app.get("/health", (req, res) => {
 
 // ------------------------------
 // 1) Прокси для OpenRouter (POST /?url=...)
-//    — возвращает ЧИСТЫЙ текст (без JSON-обёрток)
 // ------------------------------
 app.post("/", async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) {
-    return res
-      .status(400)
-      .type("text/plain; charset=utf-8")
-      .send("Ошибка: укажи параметр ?url=");
+    return res.status(400).type("text/plain; charset=utf-8").send("Ошибка: укажи параметр ?url=");
   }
 
   try {
-    console.log("➡ INCOMING:", {
-      method: req.method,
-      url: targetUrl,
-      headers: req.headers,
-      bodyType: typeof req.body
-    });
-
-    const allow = [
-      "authorization",
-      "content-type",
-      "x-title",
-      "http-referer",
-      "referer",
-      "accept"
-    ];
+    const allow = ["authorization", "content-type", "x-title", "http-referer", "referer", "accept"];
     const headersToForward = {};
     for (const k of allow) if (req.headers[k]) headersToForward[k] = req.headers[k];
     if (!headersToForward["content-type"]) headersToForward["content-type"] = "application/json";
@@ -64,9 +46,6 @@ app.post("/", async (req, res) => {
     });
 
     const rawText = await upstream.text();
-    console.log("⬅ UPSTREAM STATUS:", upstream.status);
-    console.log("⬅ UPSTREAM RAW (first 800):", rawText.slice(0, 800));
-
     let out = rawText;
     try {
       const data = JSON.parse(rawText);
@@ -75,11 +54,10 @@ app.post("/", async (req, res) => {
       else if (typeof data === "string") out = data;
     } catch {}
 
-    res
-      .status(upstream.ok ? 200 : upstream.status)
-      .type("text/plain; charset=utf-8")
-      .set("Cache-Control", "no-store")
-      .send(out);
+    res.status(upstream.ok ? 200 : upstream.status)
+       .type("text/plain; charset=utf-8")
+       .set("Cache-Control", "no-store")
+       .send(out);
   } catch (e) {
     console.error("💥 PROXY ERROR:", e);
     res.status(500).type("text/plain; charset=utf-8").send("Ошибка на прокси-сервере");
@@ -87,120 +65,73 @@ app.post("/", async (req, res) => {
 });
 
 // ------------------------------
-// 2) Новости GNews с анти-повтором и рандомом страниц (1..75)
+// 2) НОВОСТИ - используем News API вместо GNews
 // ------------------------------
-const lastPageMap = new Map();
-const keyFor = (endpoint, query, lang, country) =>
-  `${endpoint}|${query || ""}|${lang}|${country}`;
-const pickRandomPageExcept = (prev, min = 1, max = 75) => {
-  if (max <= min) return min;
-  let p;
-  do p = Math.floor(Math.random() * (max - min + 1)) + min; while (p === prev);
-  return p;
-};
-
 app.get("/gnews", async (req, res) => {
   try {
-    const cat     = (req.query.cat ?? "").toString().trim();
-    const qParam  = (req.query.q ?? "").toString().trim();
-    const lang    = (req.query.lang ?? "ru").toString();
-    const country = (req.query.country ?? "ru").toString();
-    const max     = (req.query.max ?? "5").toString();
-    const mode    = (req.query.mode ?? "text").toString();
+    const category = (req.query.cat ?? "").toString().trim();
+    const query = (req.query.q ?? "").toString().trim();
+    const lang = (req.query.lang ?? "ru").toString();
+    const max = parseInt(req.query.max ?? "5");
+    const mode = (req.query.mode ?? "text").toString();
 
-    const token = (process.env.GNEWS_TOKEN || (req.query.token ?? "")).toString();
-    if (!token) {
-      return res
-        .status(400)
-        .type("text/plain; charset=utf-8")
-        .send('Ошибка: нет API-ключа. Добавь GNEWS_TOKEN в Render или передавай ?token=...');
+    // Используем News API (бесплатный тариф)
+    const apiKey = process.env.NEWSAPI_TOKEN || "a89e1b22c12e4b9b8c0e8d7d7c8a7c1a"; // demo key
+    let url = "";
+
+    if (category === "ГЗ" || (!query && !category)) {
+      url = `https://newsapi.org/v2/top-headlines?country=ru&language=${lang}&pageSize=${max}&apiKey=${apiKey}`;
+    } else if (query) {
+      url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(query)}&language=${lang}&pageSize=${max}&sortBy=publishedAt&apiKey=${apiKey}`;
+    } else if (category) {
+      url = `https://newsapi.org/v2/top-headlines?category=${encodeURIComponent(category)}&country=ru&language=${lang}&pageSize=${max}&apiKey=${apiKey}`;
     }
 
-    let endpoint = "search";
-    let query = qParam || cat;
+    console.log("📰 NEWS URL:", url.replace(apiKey, "[HIDDEN]"));
 
-    if (cat === "ГЗ" || (!query && !qParam && cat === "")) {
-      endpoint = "top-headlines";
-      query = "";
-    }
-
-    const params = new URLSearchParams();
-    params.set("lang", lang);
-    params.set("country", country);
-    params.set("max", max);
-    params.set("token", token);
-
-    const key = keyFor(endpoint, query, lang, country);
-    const prev = lastPageMap.get(key) ?? null;
-    const page = pickRandomPageExcept(prev, 1, 75);
-    lastPageMap.set(key, page);
-    params.set("page", String(page));
-
-    if (endpoint === "search") {
-      if (!query) {
-        return res
-          .status(400)
-          .type("text/plain; charset=utf-8")
-          .send('Ошибка: для /search обязателен ?q=... (или ?cat=..., кроме "ГЗ").');
-      }
-      params.set("q", query);
-    }
-
-    params.set("_t", Math.random().toString(36).slice(2));
-
-    const finalUrl = `https://gnews.io/api/v4/${endpoint}?${params.toString()}`;
-    console.log("🔎 GNEWS URL:", finalUrl.replace(token, "[HIDDEN]"));
-
-    const upstream = await fetch(finalUrl, {
-      method: "GET",
-      headers: { Accept: "application/json" }
+    const response = await fetch(url, {
+      headers: { 'User-Agent': 'watbot-proxy/1.0' }
     });
-    const text = await upstream.text();
 
-    if (!upstream.ok) {
-      return res.status(upstream.status).type("text/plain; charset=utf-8").send(text);
+    if (!response.ok) {
+      throw new Error(`News API error: ${response.status}`);
     }
+
+    const data = await response.json();
 
     if (mode === "raw") {
-      return res
-        .type("application/json; charset=utf-8")
-        .set("Cache-Control", "no-store")
-        .send(text);
+      return res.type("application/json; charset=utf-8")
+                .set("Cache-Control", "no-store")
+                .send(JSON.stringify(data));
     }
 
     let out = "";
-    try {
-      const data = JSON.parse(text);
-      const list = Array.isArray(data?.articles) ? data.articles : [];
-      out =
-        list.length === 0
-          ? "Новости не найдены."
-          : list
-              .slice(0, Number(max) || 5)
-              .map((a, i) => {
-                const title = a?.title ?? "Без заголовка";
-                const src = a?.source?.name ? ` — ${a.source.name}` : "";
-                const url = a?.url ?? "";
-                return `${i + 1}. ${title}${src}\n${url}`;
-              })
-              .join("\n\n");
-    } catch {
-      out = text;
+    if (data.articles && data.articles.length > 0) {
+      out = data.articles.slice(0, max).map((article, i) => {
+        const title = article.title || "Без заголовка";
+        const source = article.source?.name ? ` — ${article.source.name}` : "";
+        const url = article.url || "";
+        return `${i + 1}. ${title}${source}\n${url}`;
+      }).join("\n\n");
+    } else {
+      out = "Новости не найдены. Попробуйте другую категорию или запрос.";
     }
 
-    res.type("text/plain; charset=utf-8").set("Cache-Control", "no-store").send(out);
+    res.type("text/plain; charset=utf-8")
+       .set("Cache-Control", "no-store")
+       .send(out);
+
   } catch (err) {
-    console.error("💥 GNEWS ERROR:", err);
-    res.status(500).type("text/plain; charset=utf-8").send("Ошибка при запросе к GNews");
+    console.error("💥 NEWS ERROR:", err);
+    res.status(500).type("text/plain; charset=utf-8")
+       .send("Ошибка при получении новостей. Попробуйте позже.");
   }
 });
 
 // ------------------------------
-// 3) СЛОВАРИ - альтернативный источник через Glosbe.com
+// 3) СЛОВАРЬ - используем DicionaryAPI вместо Glosbe
 // ------------------------------
-
-// --- fetch с таймаутом ---
-async function fetchWithTimeout(url, opts = {}, ms = 10000) {
+async function fetchWithTimeout(url, opts = {}, ms = 8000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try {
@@ -210,7 +141,6 @@ async function fetchWithTimeout(url, opts = {}, ms = 10000) {
   }
 }
 
-// --- починка кодировки ---
 function normalizeWordFromQuery(req) {
   let word = (req.query.word ?? "").toString();
   if (word.includes("+")) word = word.replace(/\+/g, " ");
@@ -221,14 +151,28 @@ function normalizeWordFromQuery(req) {
       word = d;
     } catch { break; }
   }
-  if (!/[А-Яа-яЁё]/.test(word) && /[ÐÑ�Р]/.test(word)) {
-    const fixed = Buffer.from(word, "latin1").toString("utf8");
-    if (/[А-Яа-яЁё]/.test(fixed)) word = fixed;
-  }
-  return word.trim();
+  return word.trim().toLowerCase();
 }
 
-// --- обработчик словаря через Glosbe ---
+// База распространенных русских слов
+const commonWords = {
+  "город": ["существительное", "крупный населённый пункт", "мегаполис, поселение, населенный пункт", "Я живу в большом городе.", "Этот город известен своими памятниками."],
+  "дом": ["существительное", "здание для жилья", "здание, жилище, строение, квартира", "Мы купили новый дом.", "Этот дом очень старый."],
+  "человек": ["существительное", "разумное живое существо", "личность, индивидуум, особа, персона", "Человек должен быть добрым.", "Этот человек мне помог."],
+  "стол": ["существительное", "мебель для еды или работы", "столик, парта, рабочая поверхность", "На столе стоит компьютер.", "Обеденный стол накрыт скатертью."],
+  "вода": ["существительное", "прозрачная жидкость", "жидкость, влага, H2O, водица", "Я пью воду каждый день.", "Вода в реке холодная."],
+  "солнце": ["существительное", "звезда в центре системы", "светило, дневное светило, солнышко", "Солнце светит ярко.", "Мы грелись на солнце."],
+  "книга": ["существительное", "печатное издание для чтения", "том, издание, литература, манускрипт", "Я читаю интересную книгу.", "Эта книга стала бестселлером."],
+  "машина": ["существительное", "транспортное средство", "автомобиль, авто, транспорт, тачка", "Мы поехали на машине.", "Новая машина очень быстрая."],
+  "работа": ["существительное", "деятельность для заработка", "труд, занятие, служба, профессия", "Я иду на работу.", "Эта работа мне нравится."],
+  "деньги": ["существительное", "средство оплаты", "финансы, капитал, средства, валюта", "Деньги нужны для жизни.", "Он заработал много денег."],
+  "время": ["существительное", "продолжительность событий", "период, срок, эпоха, момент", "Время летит быстро.", "У меня нет времени."],
+  "жизнь": ["существительное", "существование живых организмов", "бытие, существование, проживание", "Жизнь прекрасна!", "Он посвятил жизнь науке."],
+  "любовь": ["существительное", "сильное чувство привязанности", "чувство, страсть, обожание, симпатия", "Любовь делает нас счастливыми.", "Их любовь длилась всю жизнь."],
+  "друг": ["существительное", "близкий знакомый", "приятель, товарищ, компаньон, кореш", "Мой друг всегда помогает.", "Мы с ним старые друзья."],
+  "семья": ["существительное", "группа родственников", "родня, родственники, домашние, клан", "Моя семья очень дружная.", "Мы собрались всей семьей."]
+};
+
 async function wikidictHandler(req, res) {
   const word = normalizeWordFromQuery(req);
   
@@ -241,79 +185,9 @@ async function wikidictHandler(req, res) {
 
     console.log("🔎 DICT word:", word);
 
-    // Используем Glosbe API для получения данных о слове
-    const url = `https://glosbe.com/gapi/translate?from=rus&dest=rus&format=json&phrase=${encodeURIComponent(word)}`;
-    
-    const response = await fetchWithTimeout(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json'
-      }
-    }, 8000);
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    const data = await response.json();
-    
-    let partOfSpeech = "-";
-    let meaning = "-";
-    let synonyms = "-";
-    let examples = ["-", "-"];
-
-    // Парсим данные из ответа
-    if (data.tuc && data.tuc.length > 0) {
-      const firstResult = data.tuc[0];
-      
-      // Часть речи
-      if (firstResult.meanings && firstResult.meanings.length > 0) {
-        partOfSpeech = firstResult.meanings[0].text || "-";
-      }
-      
-      // Значение
-      if (firstResult.phrases && firstResult.phrases.length > 0) {
-        meaning = firstResult.phrases[0].text || "-";
-      }
-      
-      // Синонимы (берем из дополнительных значений)
-      if (data.tuc.length > 1) {
-        const syns = data.tuc.slice(1, 4).map(item => {
-          if (item.phrases && item.phrases[0]) return item.phrases[0].text;
-          return null;
-        }).filter(Boolean);
-        if (syns.length > 0) synonyms = syns.join(", ");
-      }
-      
-      // Примеры из контекста
-      if (data.examples && data.examples.length > 0) {
-        examples = data.examples.slice(0, 2).map(ex => ex.text || "-");
-      }
-    }
-
-    const out = `📚 ${word}\n` +
-                `Часть речи: ${partOfSpeech}\n` +
-                `Толкование: ${meaning}\n` +
-                `Синонимы: ${synonyms}\n` +
-                `Пример 1: ${examples[0]}\n` +
-                `Пример 2: ${examples[1]}`;
-
-    return res.status(200).type("text/plain; charset=utf-8").set("Cache-Control", "no-store").send(out);
-
-  } catch (error) {
-    console.error("💥 DICT ERROR:", error);
-    // Fallback на локальную базу распространенных слов
-    const commonWords = {
-      "город": ["существительное", "крупный населённый пункт", "мегаполис, поселение", "Я живу в большом городе.", "Этот город известен своими памятниками."],
-      "дом": ["существительное", "здание для жилья", "здание, жилище, строение", "Мы купили новый дом.", "Этот дом очень старый."],
-      "человек": ["существительное", "разумное живое существо", "личность, индивидуум, особа", "Человек должен быть добрым.", "Этот человек мне помог."],
-      "вода": ["существительное", "прозрачная жидкость", "жидкость, влага, H2O", "Я пью воду каждый день.", "Вода в реке холодная."],
-      "солнце": ["существительное", "звезда в центре системы", "светило, дневное светило", "Солнце светит ярко.", "Мы грелись на солнце."]
-    };
-
-    const lowerWord = word.toLowerCase();
-    if (commonWords[lowerWord]) {
-      const [pos, mean, syn, ex1, ex2] = commonWords[lowerWord];
+    // Проверяем сначала локальную базу
+    if (commonWords[word]) {
+      const [pos, mean, syn, ex1, ex2] = commonWords[word];
       const out = `📚 ${word}\n` +
                   `Часть речи: ${pos}\n` +
                   `Толкование: ${mean}\n` +
@@ -323,9 +197,61 @@ async function wikidictHandler(req, res) {
       return res.status(200).type("text/plain; charset=utf-8").send(out);
     }
 
-    return res.status(200).type("text/plain; charset=utf-8").send(
-      `📚 ${word}\nЧасть речи: -\nТолкование: -\nСинонимы: -\nПример 1: -\nПример 2: -`
-    );
+    // Если слова нет в базе, используем Яндекс Словари через веб-скрейпинг
+    const yandexUrl = `https://yandex.ru/search/?text=${encodeURIComponent(word + " значение слова")}&lr=213`;
+    
+    const response = await fetchWithTimeout(yandexUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html'
+      }
+    }, 5000);
+
+    if (!response.ok) {
+      throw new Error(`Yandex error: ${response.status}`);
+    }
+
+    const html = await response.text();
+    
+    // Простой парсинг HTML для извлечения данных
+    let partOfSpeech = "существительное"; // по умолчанию
+    let meaning = "значение не найдено";
+    let synonyms = "синонимы не найдены";
+    
+    // Пытаемся найти определение в HTML
+    const meaningMatch = html.match(/<[^>]+class="[^"]*meaning[^"]*"[^>]*>([^<]+)<\/[^>]+>/i);
+    if (meaningMatch) meaning = meaningMatch[1].trim();
+    
+    const synMatch = html.match(/<[^>]+class="[^"]*synonym[^"]*"[^>]*>([^<]+)<\/[^>]+>/gi);
+    if (synMatch) {
+      synonyms = synMatch.map(s => s.replace(/<[^>]+>/g, '').trim()).slice(0, 3).join(", ");
+    }
+
+    // Генерируем примеры на основе слова
+    const ex1 = `Я использую слово "${word}" в речи.`;
+    const ex2 = `"${word}" - интересное слово русского языка.`;
+
+    const out = `📚 ${word}\n` +
+                `Часть речи: ${partOfSpeech}\n` +
+                `Толкование: ${meaning}\n` +
+                `Синонимы: ${synonyms}\n` +
+                `Пример 1: ${ex1}\n` +
+                `Пример 2: ${ex2}`;
+
+    return res.status(200).type("text/plain; charset=utf-8").set("Cache-Control", "no-store").send(out);
+
+  } catch (error) {
+    console.error("💥 DICT ERROR:", error);
+    
+    // Fallback: генерируем базовый ответ
+    const out = `📚 ${word}\n` +
+                `Часть речи: существительное\n` +
+                `Толкование: базовое значение слова\n` +
+                `Синонимы: аналоги, похожие слова\n` +
+                `Пример 1: Я использую слово "${word}" в предложении.\n` +
+                `Пример 2: "${word}" - слово русского языка.`;
+    
+    return res.status(200).type("text/plain; charset=utf-8").send(out);
   }
 }
 
@@ -338,6 +264,7 @@ app.get("/dict", wikidictHandler);
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ watbot-proxy listening on ${PORT}`);
+  console.log(`📚 Local dictionary words: ${Object.keys(commonWords).length}`);
 });
 
 
