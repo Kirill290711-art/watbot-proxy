@@ -1,14 +1,14 @@
-// src/server.js
+33// src/server.js
 import express from "express";
 import cors from "cors";
 
 const app = express();
 
-// CORS и парсинг JSON (универсально)
+// парсинг JSON
 app.use(cors());
 app.use(express.json({ type: "*/*", limit: "1mb" }));
 
-// Явная настройка CORS для всех routes
+// настройка CORS
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
@@ -16,14 +16,14 @@ app.use((req, res, next) => {
 });
 
 // ------------------------------
-// Healthcheck
+// Проверка
 // ------------------------------
 app.get("/health", (req, res) => {
   res.type("text/plain; charset=utf-8").send(`ok ${new Date().toISOString()}`);
 });
 
 // ------------------------------
-// 1) Прокси для OpenRouter (POST /?url=...)
+// Openrouter
 // ------------------------------
 app.post("/", async (req, res) => {
   const targetUrl = req.query.url;
@@ -61,19 +61,19 @@ app.post("/", async (req, res) => {
       }
     }
 
-    // Убеждаемся, что content-type установлен
+    // провнрка content-type
     if (!headersToForward["content-type"]) {
       headersToForward["content-type"] = "application/json";
     }
 
-    // Если Authorization отсутствует в headers, проверяем body
+    // проверяем body
     let authHeader = headersToForward["authorization"];
     if (!authHeader && req.body && req.body.authorization) {
       authHeader = req.body.authorization;
       delete req.body.authorization; // Удаляем из body чтобы не дублировать
     }
 
-    // Если все еще нет авторизации, используем дефолтную
+    // деф авторизация
     if (!authHeader) {
       authHeader = process.env.OPENROUTER_API_KEY || "Bearer sk-or-v1-...";
     }
@@ -123,7 +123,7 @@ app.post("/", async (req, res) => {
 });
 
 // ------------------------------
-// 2) НОВОСТИ - упрощенная версия
+// НОВОСТИ
 // ------------------------------
 app.get("/gnews", async (req, res) => {
   try {
